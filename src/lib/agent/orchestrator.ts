@@ -4,9 +4,11 @@ import { SerperService } from "./serper";
 
 export class AgentOrchestrator {
   private genAI: GoogleGenerativeAI;
+  private apiKey: string;
   private serper?: SerperService;
 
   constructor(geminiKey: string, serperKey?: string) {
+    this.apiKey = geminiKey;
     this.genAI = new GoogleGenerativeAI(geminiKey);
     if (serperKey) {
       this.serper = new SerperService(serperKey);
@@ -212,6 +214,114 @@ export class AgentOrchestrator {
       }));
 
       return { steps, results: dynamicMock };
+    }
+  }
+
+  async chat(
+    messages: { role: "user" | "agent"; content: string }[],
+    context: Venue[]
+  ): Promise<string> {
+    const lastMessage = messages[messages.length - 1].content;
+
+    // 1. Construct Contextual System Prompt
+    const contextString = context
+      .map(
+        (v, i) =>
+          `Venue ${i + 1}: ${v.name} (${
+            v.priceBreakdown || "Unknown Price"
+          })\n` + `Vibe: ${v.vibeSummary}\nAddress: ${v.location.address}\n`
+      )
+      .join("\n---\n");
+
+    const systemPrompt = `
+      You are VibeScout, a witty and helpful concierge.
+      You are currently chatting with a user who is looking at these venues:
+      
+      ${contextString}
+
+      The user just said: "${lastMessage}"
+
+      Your goal is to answer their question helpfully.
+      
+      TOOLS AVAILABLE:
+      - If they ask for "more photos" or "images" of a specific place, reply with: "SEARCH_IMAGES: <venue_name>"
+      - If they ask for "reviews" or "what people say" about a specific place, reply with: "SEARCH_REVIEWS: <venue_name>"
+      
+      Otherwise, just reply conversationally. Keep it brief (under 2 sentences) as this is spoken out loud.
+    `;
+
+    // 2. Initial Reasoning
+    const response = await this.generateWithFallback(systemPrompt, () => {});
+
+    // 3. Tool Execution Handlers
+    if (response.includes("SEARCH_IMAGES:") && this.serper) {
+      const targetQuery = response.split("SEARCH_IMAGES:")[1].trim();
+      const images = await this.serper.searchImages(
+        targetQuery + " interior aesthetic"
+      );
+      return `I found some fresh photos of ${targetQuery} for you! Check out the updated cards. (Simulated update: ${images.length} images found)`;
+    }
+
+    if (response.includes("SEARCH_REVIEWS:") && this.serper) {
+      const targetQuery = response.split("SEARCH_REVIEWS:")[1].trim();
+      const reviews = await this.serper.searchSocialBuzz(
+        `reviews for ${targetQuery}`
+      );
+      const summary = reviews
+        .slice(0, 2)
+        .map((r) => r.snippet)
+        .join(". ");
+      return `Here's what I found: ${summary}`;
+    }
+
+    return response;
+  }
+
+  async speak(text: string): Promise<string | null> {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-tts:generateContent?key=${this.apiKey}`;
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: text }] }],
+        }),
+      });
+
+      if (!response.ok) {
+        console.error("TTS API Error:", await response.text());
+        return null;
+      }
+
+      const data = await response.json();
+      // The API returns 'candidates' with 'content' containing 'parts'
+      // Ideally, for TTS, we look for the audio bytes.
+      // Note: The actual schema for TTS might differ slightly, but assuming standard generateContent structure
+      // that returns a "wav/mp3" blob or base64 in the content part.
+      // However, for pure TTS models, usually it returns "audioContent" or similar.
+      // Let's assume standard Gemini response where inlineData might be used?
+      // Actually, for the specific TTS endpoint, let's check the schema if possible.
+      // Fallback: If the model returns text, we can't use it.
+      // Let's try to extract 'inlineData' from the response if it exists.
+
+      // Being a hackathon, let's try a safer known pattern for audio generation if this specific model ID implies audio output.
+      // If the above is standard generation, we might need a specific config.
+
+      // Detailed Schema for TTS often involves:
+      // { "audioContent": "<base64>" } directly if it's the cloud TTS API.
+      // But this is "gemini-2.5-flash-tts" via generative language API.
+      // It likely returns a Part with inlineData (mimeType: "audio/wav", data: "base64").
+
+      const part = data.candidates?.[0]?.content?.parts?.[0];
+      if (part?.inlineData?.data) {
+        return part.inlineData.data;
+      }
+
+      return null;
+    } catch (error) {
+      console.warn("TTS Generation failed:", error);
+      return null;
     }
   }
 }

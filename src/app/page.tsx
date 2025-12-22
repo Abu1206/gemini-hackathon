@@ -4,6 +4,7 @@ import { useState } from "react";
 import PreferenceForm from "@/components/PreferenceForm";
 import AgentTimeline from "@/components/AgentTimeline";
 import VenueCard from "@/components/VenueCard";
+import VoiceChatInterface from "@/components/VoiceChatInterface";
 import { SearchParameters, AgentStep, Venue } from "@/lib/agent/types";
 import { motion, AnimatePresence } from "framer-motion";
 import { Sparkles, Compass } from "lucide-react";
@@ -324,6 +325,10 @@ export default function Home() {
                 </button>
               </div>
             </motion.div>
+          )}
+
+          {!isDiscovering && results.length > 0 && (
+            <VoiceChatInterface currentVenues={results} />
           )}
         </AnimatePresence>
       </main>

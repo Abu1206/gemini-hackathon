@@ -20,7 +20,6 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
   const [transcript, setTranscript] = useState("");
 
   const recognitionRef = useRef<any>(null);
-  const synthesisRef = useRef<SpeechSynthesis | null>(null);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -48,9 +47,6 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
           }
         };
       }
-
-      // Initialize Speech Synthesis
-      synthesisRef.current = window.speechSynthesis;
     }
   }, [transcript]);
 
@@ -64,22 +60,19 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
     }
   };
 
-  const speak = (text: string) => {
-    if (synthesisRef.current) {
-      // Cancel any ongoing speech
-      synthesisRef.current.cancel();
-
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.onstart = () => setIsSpeaking(true);
-      utterance.onend = () => setIsSpeaking(false);
-
-      // Try to find a good voice
-      const voices = synthesisRef.current.getVoices();
-      const preferredVoice =
-        voices.find((v) => v.name.includes("Google US English")) || voices[0];
-      if (preferredVoice) utterance.voice = preferredVoice;
-
-      synthesisRef.current.speak(utterance);
+  const playAudio = (base64Audio: string) => {
+    try {
+      const audio = new Audio(`data:audio/mp3;base64,${base64Audio}`);
+      audio.onplay = () => setIsSpeaking(true);
+      audio.onended = () => setIsSpeaking(false);
+      audio.onerror = (e) => {
+        console.error("Audio playback error", e);
+        setIsSpeaking(false);
+      };
+      audio.play();
+    } catch (e) {
+      console.error("Failed to play audio", e);
+      setIsSpeaking(false);
     }
   };
 
@@ -103,6 +96,7 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
 
       const data = await response.json();
       const agentResponse = data.response;
+      const audioData = data.audio;
 
       // Add agent message
       setMessages((prev) => [
@@ -110,12 +104,13 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
         { role: "agent", content: agentResponse },
       ]);
 
-      // Speak response
-      speak(agentResponse);
+      // Play audio response
+      if (audioData) {
+        playAudio(audioData);
+      }
     } catch (error) {
       console.error("Chat error:", error);
-      const errorMsg = "Sorry, I lost my connection to the Vibe Cloud.";
-      speak(errorMsg);
+      // Fallback if audio fails? Just text is fine for now
     }
   };
 
