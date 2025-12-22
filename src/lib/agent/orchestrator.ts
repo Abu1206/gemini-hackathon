@@ -1,15 +1,15 @@
-import { GoogleGenerativeAI, GenerativeModel } from "@google/generative-ai";
+import { GoogleGenAI } from "@google/genai";
 import { SearchParameters, AgentStep, Venue } from "./types";
 import { SerperService } from "./serper";
 
 export class AgentOrchestrator {
-  private genAI: GoogleGenerativeAI;
+  private ai: GoogleGenAI;
   private apiKey: string;
   private serper?: SerperService;
 
   constructor(geminiKey: string, serperKey?: string) {
     this.apiKey = geminiKey;
-    this.genAI = new GoogleGenerativeAI(geminiKey);
+    this.ai = new GoogleGenAI({ apiKey: geminiKey });
     if (serperKey) {
       this.serper = new SerperService(serperKey);
     }
@@ -19,18 +19,24 @@ export class AgentOrchestrator {
     prompt: string,
     addStep: (action: string, thought?: string) => void
   ): Promise<string> {
-    const models = [
-      "gemini-2.5-flash",
-      "gemini-3-flash",
-
-      "gemini-2.5-flash-lite",
-    ];
+    const models = ["gemini-3-flash-preview", "gemini-2.5-flash"];
 
     for (const modelName of models) {
       try {
-        const model = this.genAI.getGenerativeModel({ model: modelName });
-        const result = await model.generateContent(prompt);
-        return result.response.text();
+        const config: any = {
+          // Only enable thinking for the preview model
+          ...(modelName === "gemini-3-flash-preview"
+            ? { thinkingConfig: { thinkingLevel: "HIGH" } }
+            : {}),
+        };
+
+        const response = await this.ai.models.generateContent({
+          model: modelName,
+          config,
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+        });
+
+        return response.text() || "";
       } catch (error: any) {
         // Log warning but continue to next model
         const errorMessage = error.message || "Unknown error";
@@ -40,8 +46,6 @@ export class AgentOrchestrator {
 
         const isLastModel = modelName === models[models.length - 1];
         if (!isLastModel) {
-          // Only add a visible step if we are switching major versions or it feels significant
-          // heavily reduced verbosity to avoid cluttering the UI with "Switching..." steps
           continue;
         }
 
