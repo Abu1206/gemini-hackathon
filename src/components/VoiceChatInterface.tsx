@@ -13,7 +13,62 @@ interface Message {
   content: string;
   data?: any;
   type?: "text" | "images" | "reviews" | "web_results";
+  thoughts?: string;
 }
+
+const BrainProcess = ({ thoughts }: { thoughts: string }) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  if (!thoughts) return null;
+
+  return (
+    <div style={{ marginBottom: "8px", width: "100%" }}>
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        style={{
+          background: "rgba(0, 255, 170, 0.1)",
+          border: "1px solid rgba(0, 255, 170, 0.3)",
+          color: "rgba(0, 255, 170, 0.8)",
+          padding: "4px 8px",
+          borderRadius: "4px",
+          fontSize: "0.75rem",
+          cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          gap: "6px",
+          width: "100%",
+          textAlign: "left",
+          fontFamily: "monospace",
+        }}
+      >
+        <span>{isExpanded ? "▼" : "▶"}</span>
+        <span>Reasoning Process</span>
+      </button>
+      {isExpanded && (
+        <motion.div
+          initial={{ opacity: 0, height: 0 }}
+          animate={{ opacity: 1, height: "auto" }}
+          style={{
+            background: "rgba(0, 0, 0, 0.3)",
+            border: "1px solid rgba(0, 255, 170, 0.1)",
+            borderTop: "none",
+            borderRadius: "0 0 4px 4px",
+            padding: "8px",
+            fontSize: "0.75rem",
+            color: "rgba(0, 255, 170, 0.7)",
+            fontFamily: "monospace",
+            whiteSpace: "pre-wrap",
+            overflowX: "hidden",
+            maxHeight: "200px",
+            overflowY: "auto",
+          }}
+        >
+          {thoughts}
+        </motion.div>
+      )}
+    </div>
+  );
+};
 
 export default function VoiceChatInterface({ currentVenues }: Props) {
   const [isOpen, setIsOpen] = useState(false);
@@ -336,6 +391,9 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
               }}
             >
               <div style={{ marginBottom: msg.data ? "8px" : "0" }}>
+                {msg.role === "agent" && msg.thoughts && (
+                  <BrainProcess thoughts={msg.thoughts} />
+                )}
                 {msg.content}
               </div>
 

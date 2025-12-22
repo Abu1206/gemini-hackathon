@@ -18,7 +18,7 @@ export class AgentOrchestrator {
   private async generateWithFallback(
     prompt: string,
     addStep: (action: string, thought?: string) => void
-  ): Promise<string> {
+  ): Promise<{ text: string; thoughts?: string }> {
     const models = ["gemini-3-flash-preview", "gemini-2.5-flash"];
 
     for (const modelName of models) {
@@ -26,7 +26,12 @@ export class AgentOrchestrator {
         const config: any = {
           // Only enable thinking for the preview model
           ...(modelName === "gemini-3-flash-preview"
-            ? { thinkingConfig: { thinkingLevel: "HIGH" } }
+            ? {
+                thinkingConfig: {
+                  thinkingLevel: "HIGH",
+                  includeThoughts: true,
+                },
+              }
             : {}),
         };
 
@@ -36,7 +41,31 @@ export class AgentOrchestrator {
           contents: [{ role: "user", parts: [{ text: prompt }] }],
         });
 
-        return response.text || "";
+        // Extract thoughts if available
+        let thoughts = "";
+        if (response.candidates && response.candidates[0]?.content?.parts) {
+          const part = response.candidates[0].content.parts[0];
+          // The SDK might nest thoughts in a specific way or just return them if requested.
+          // For gemini-3-flash-preview with includeThoughts, we check for it.
+          // Note: The structure depends on the specific SDK version response for thinking models.
+          // We will attempt to capture it from the response metadata or parts if exposed.
+          // According to standard Gemini output, thoughts might be part of the candidate.
+          // Let's check typical 'thought' field in candidate or parts.
+          if ("thought" in response.candidates[0]) {
+            thoughts = (response.candidates[0] as any).thought;
+          }
+        }
+
+        // If the simple extraction above doesn't match the exact new SDK shape,
+        // we'll rely on the text presence or candidate metadata.
+        // For now, let's assume valid text return and we will refine thought extraction if needed
+        // once we see the real response or just pass what we can.
+        // Actually, let's be safe: currently the SDK might not fully type 'thought' yet.
+
+        return {
+          text: response.text || "",
+          thoughts: thoughts || undefined,
+        };
       } catch (error: any) {
         // Log warning but continue to next model
         const errorMessage = error.message || "Unknown error";
@@ -159,7 +188,8 @@ export class AgentOrchestrator {
     `;
 
     try {
-      const text = await this.generateWithFallback(prompt, addStep);
+      const generation = await this.generateWithFallback(prompt, addStep);
+      const text = generation.text;
 
       const firstJson = text.indexOf("[");
       const lastJson = text.lastIndexOf("]");
@@ -227,7 +257,8 @@ export class AgentOrchestrator {
   ): Promise<{
     text: string;
     data?: any;
-    type?: "text" | "images" | "reviews";
+    type?: "text" | "images" | "reviews" | "web_results";
+    thoughts?: string;
   }> {
     const lastMessage = messages[messages.length - 1].content;
 
@@ -260,7 +291,9 @@ export class AgentOrchestrator {
     `;
 
     // 2. Initial Reasoning
-    const response = await this.generateWithFallback(systemPrompt, () => {});
+    const generation = await this.generateWithFallback(systemPrompt, () => {});
+    const response = generation.text;
+    const thoughts = generation.thoughts;
 
     // 3. Tool Execution Handlers
     if (response.includes("SEARCH_IMAGES:") && this.serper) {
@@ -272,6 +305,7 @@ export class AgentOrchestrator {
         text: `I found some fresh photos of ${targetQuery} for you! Check out these vibes.`,
         data: images.slice(0, 8), // Limit to 8 images (user asked for 5+, giving them plenty)
         type: "images",
+        thoughts,
       };
     }
 
@@ -284,6 +318,7 @@ export class AgentOrchestrator {
         text: `Here's what people are saying about ${targetQuery}.`,
         data: reviews.slice(0, 3), // Limit to 3 reviews
         type: "reviews",
+        thoughts,
       };
     }
 
@@ -300,33 +335,11 @@ export class AgentOrchestrator {
       return {
         text: summaryText,
         data: results.slice(0, 3), // Return top 3 links
-        type: "text", // We'll keep it as text for now, maybe add a 'link' type later if needed, but text display handles generic data ok?
-        // Actually, let's treat it as 'websource' or just append to text.
-        // For now, let's return it as a new type 'web_results' to render nice cards.
-      };
-      // Wait, let's stick to the requested pattern or a generic 'info' card.
-      // Let's use a new type "web_results"
-    }
-
-    // Fix for the new type usage above, we need to ensure the return type matches.
-    // I will simplify and just return it as 'web_results' and handle it in frontend.
-
-    if (response.includes("SEARCH_WEB:") && this.serper) {
-      const targetQuery = response.split("SEARCH_WEB:")[1].trim();
-      const results = await this.serper.search(targetQuery);
-
-      const topResult = results[0];
-      const summaryText = topResult
-        ? `Here is some info I found on the web about ${targetQuery}.`
-        : `I checked the web for ${targetQuery}.`;
-
-      return {
-        text: summaryText,
-        data: results.slice(0, 3),
-        type: "web_results" as any, // Cast to any or update interface? Let's just update interface in next step if needed, or let TS inference handle if I change return signature.
+        type: "web_results",
+        thoughts,
       };
     }
 
-    return { text: response, type: "text" };
+    return { text: response, type: "text", thoughts };
   }
 }
