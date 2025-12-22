@@ -10,10 +10,9 @@ export async function POST(request: Request) {
       process.env.SERPER_API_KEY
     );
 
-    const responseText = await orchestrator.chat(messages, currentVenues);
-    const audioData = await orchestrator.speak(responseText);
+    const result = await orchestrator.chat(messages, currentVenues);
 
-    return NextResponse.json({ response: responseText, audio: audioData });
+    return NextResponse.json(result);
   } catch (error) {
     console.error("Chat API Error:", error);
     return NextResponse.json(
