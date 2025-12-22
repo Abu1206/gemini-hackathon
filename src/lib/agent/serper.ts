@@ -11,7 +11,7 @@ export class SerperService {
     this.apiKey = apiKey;
   }
 
-  async searchSocialBuzz(query: string): Promise<SerperResult[]> {
+  async search(query: string, limit: number = 5): Promise<SerperResult[]> {
     const response = await fetch("https://google.serper.dev/search", {
       method: "POST",
       headers: {
@@ -20,7 +20,7 @@ export class SerperService {
       },
       body: JSON.stringify({
         q: query,
-        num: 10,
+        num: limit,
       }),
     });
 
@@ -32,6 +32,10 @@ export class SerperService {
     return data.organic || [];
   }
 
+  async searchSocialBuzz(query: string): Promise<SerperResult[]> {
+    return this.search(query, 10);
+  }
+
   async searchImages(query: string): Promise<string[]> {
     const response = await fetch("https://google.serper.dev/images", {
       method: "POST",
@@ -41,7 +45,7 @@ export class SerperService {
       },
       body: JSON.stringify({
         q: query,
-        num: 5,
+        num: 15, // Increase to 15 to ensure we get enough valid ones after filtering
       }),
     });
 

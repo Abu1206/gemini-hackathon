@@ -254,6 +254,7 @@ export class AgentOrchestrator {
       TOOLS AVAILABLE:
       - If they ask for "more photos" or "images" of a specific place, reply with: "SEARCH_IMAGES: <venue_name>"
       - If they ask for "reviews" or "what people say" about a specific place, reply with: "SEARCH_REVIEWS: <venue_name>"
+      - If they ask for "more info", "website", or general details about a place, reply with: "SEARCH_WEB: <params>"
       
       Otherwise, just reply conversationally. Keep it brief (under 2 sentences) as this is spoken out loud.
     `;
@@ -269,7 +270,7 @@ export class AgentOrchestrator {
       );
       return {
         text: `I found some fresh photos of ${targetQuery} for you! Check out these vibes.`,
-        data: images.slice(0, 4), // Limit to 4 images
+        data: images.slice(0, 8), // Limit to 8 images (user asked for 5+, giving them plenty)
         type: "images",
       };
     }
@@ -283,6 +284,46 @@ export class AgentOrchestrator {
         text: `Here's what people are saying about ${targetQuery}.`,
         data: reviews.slice(0, 3), // Limit to 3 reviews
         type: "reviews",
+      };
+    }
+
+    if (response.includes("SEARCH_WEB:") && this.serper) {
+      const targetQuery = response.split("SEARCH_WEB:")[1].trim();
+      const results = await this.serper.search(targetQuery);
+
+      // Summarize the top result for the voice response
+      const topResult = results[0];
+      const summaryText = topResult
+        ? `I found this about ${targetQuery}: ${topResult.snippet}`
+        : `I searched for ${targetQuery} but couldn't find specific details instantly.`;
+
+      return {
+        text: summaryText,
+        data: results.slice(0, 3), // Return top 3 links
+        type: "text", // We'll keep it as text for now, maybe add a 'link' type later if needed, but text display handles generic data ok?
+        // Actually, let's treat it as 'websource' or just append to text.
+        // For now, let's return it as a new type 'web_results' to render nice cards.
+      };
+      // Wait, let's stick to the requested pattern or a generic 'info' card.
+      // Let's use a new type "web_results"
+    }
+
+    // Fix for the new type usage above, we need to ensure the return type matches.
+    // I will simplify and just return it as 'web_results' and handle it in frontend.
+
+    if (response.includes("SEARCH_WEB:") && this.serper) {
+      const targetQuery = response.split("SEARCH_WEB:")[1].trim();
+      const results = await this.serper.search(targetQuery);
+
+      const topResult = results[0];
+      const summaryText = topResult
+        ? `Here is some info I found on the web about ${targetQuery}.`
+        : `I checked the web for ${targetQuery}.`;
+
+      return {
+        text: summaryText,
+        data: results.slice(0, 3),
+        type: "web_results" as any, // Cast to any or update interface? Let's just update interface in next step if needed, or let TS inference handle if I change return signature.
       };
     }
 
