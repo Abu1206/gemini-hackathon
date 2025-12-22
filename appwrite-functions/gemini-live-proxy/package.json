@@ -1,0 +1,17 @@
+{
+  "name": "gemini-live-proxy",
+  "version": "1.0.0",
+  "description": "WebSocket proxy for Gemini Live API",
+  "main": "src/main.js",
+  "type": "module",
+  "scripts": {
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "@appwrite.io/sdk": "^0.0.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "prettier": "^3.0.0"
+  }
+}

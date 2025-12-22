@@ -1,0 +1,25 @@
+{
+  "$schema": "https://appwrite.io/schemas/appwrite.json",
+  "projectId": "[YOUR_PROJECT_ID]",
+  "projectName": "VibeScout",
+  "functions": [
+    {
+      "$id": "gemini-live-proxy",
+      "name": "Gemini Live Proxy",
+      "runtime": "node-18.0",
+      "path": "appwrite-functions/gemini-live-proxy",
+      "entrypoint": "src/main.js",
+      "ignore": ["node_modules", ".npm"],
+      "execute": ["any"],
+      "events": [],
+      "schedule": "",
+      "timeout": 900,
+      "enabled": true,
+      "logging": true,
+      "scopes": [],
+      "variables": {
+        "GEMINI_API_KEY": ""
+      }
+    }
+  ]
+}

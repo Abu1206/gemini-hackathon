@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef } from "react";
 import { Venue } from "@/lib/agent/types";
 import { motion, AnimatePresence } from "framer-motion";
+import { useLiveAPI } from "@/hooks/useLiveAPI";
+import { AudioRecorder } from "@/utils/audioRecorder";
 
 interface Props {
   currentVenues: Venue[];
@@ -72,75 +74,16 @@ const BrainProcess = ({ thoughts }: { thoughts: string }) => {
 
 export default function VoiceChatInterface({ currentVenues }: Props) {
   const [isOpen, setIsOpen] = useState(false);
-  const [isListening, setIsListening] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [isActive, setIsActive] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [transcript, setTranscript] = useState("");
-  const [selectedVoice, setSelectedVoice] =
-    useState<SpeechSynthesisVoice | null>(null);
+  const [statusText, setStatusText] = useState("");
 
-  const recognitionRef = useRef<any>(null);
-  const synthesisRef = useRef<SpeechSynthesis | null>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
+  const audioRecorderRef = useRef<AudioRecorder | null>(null);
 
-  // Initialize TTS and STT
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      // Setup TTS
-      synthesisRef.current = window.speechSynthesis;
+  const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || "";
 
-      const loadVoices = () => {
-        const voices = synthesisRef.current?.getVoices() || [];
-        // Try to find a nice natural voice
-        const preferredVoice =
-          voices.find(
-            (v) =>
-              v.name.includes("Google US English") ||
-              v.name.includes("Samantha") ||
-              v.name.includes("Natural")
-          ) || voices[0];
-        setSelectedVoice(preferredVoice || null);
-      };
-
-      loadVoices();
-      if (synthesisRef.current?.onvoiceschanged !== undefined) {
-        synthesisRef.current.onvoiceschanged = loadVoices;
-      }
-
-      // Setup STT
-      const SpeechRecognition =
-        (window as any).SpeechRecognition ||
-        (window as any).webkitSpeechRecognition;
-
-      if (SpeechRecognition) {
-        recognitionRef.current = new SpeechRecognition();
-        recognitionRef.current.continuous = false;
-        recognitionRef.current.interimResults = true;
-        recognitionRef.current.lang = "en-US";
-
-        recognitionRef.current.onresult = (event: any) => {
-          const current = event.resultIndex;
-          const transcriptText = event.results[current][0].transcript;
-          setTranscript(transcriptText);
-        };
-
-        recognitionRef.current.onend = () => {
-          setIsListening(false);
-          // Only send if we actually have text and weren't just toggled off manually
-          // accessing state in event listener is tricky, checking transcript length in a ref would be better
-          // but for this simple version, we'll let the effect/state flow handle it manually or check non-empty
-        };
-      }
-    }
-  }, []);
-
-  // Trigger send when listening stops and we have a transcript
-  useEffect(() => {
-    if (!isListening && transcript.trim().length > 0) {
-      handleSendMessage(transcript);
-    }
-  }, [isListening]); // Only trigger when listening state transitions to false
+  const liveAPI = useLiveAPI({ apiKey });
 
   // Auto-scroll to bottom of chat
   useEffect(() => {
@@ -150,91 +93,53 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
     }
   }, [messages]);
 
-  const speak = (text: string) => {
-    if (!synthesisRef.current) return;
-
-    // Cancel current speech
-    synthesisRef.current.cancel();
-
-    // Strip markdown (asterisks, etc) for cleaner speech
-    const cleanText = text.replace(/[*#_`]/g, "");
-
-    const utterance = new SpeechSynthesisUtterance(cleanText);
-    if (selectedVoice) {
-      utterance.voice = selectedVoice;
-    }
-    utterance.pitch = 1.0;
-    utterance.rate = 1.0;
-    utterance.volume = 1.0;
-
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
-
-    synthesisRef.current.speak(utterance);
-  };
-
-  const toggleListening = () => {
-    if (isListening) {
-      recognitionRef.current?.stop();
-    } else {
-      setTranscript("");
-      // Cancel any current speaking
-      synthesisRef.current?.cancel();
-      setIsSpeaking(false);
-
-      try {
-        recognitionRef.current?.start();
-        setIsListening(true);
-      } catch (e) {
-        console.error("Mic start error", e);
+  const toggleLiveChat = async () => {
+    if (!isActive) {
+      // Start Live API session
+      if (!apiKey) {
+        alert("Please add NEXT_PUBLIC_GEMINI_API_KEY to your .env.local file");
+        return;
       }
+
+      setStatusText("Connecting...");
+      liveAPI.connect();
+
+      // Wait a moment for connection
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      if (liveAPI.isConnected) {
+        setStatusText("Listening...");
+        setIsActive(true);
+
+        // Start audio recording
+        audioRecorderRef.current = new AudioRecorder();
+        await audioRecorderRef.current.start((audioData) => {
+          liveAPI.sendAudio(audioData);
+        });
+      } else {
+        setStatusText("Connection failed");
+      }
+    } else {
+      // Stop Live API session
+      setStatusText("");
+      setIsActive(false);
+
+      if (audioRecorderRef.current) {
+        audioRecorderRef.current.stop();
+        audioRecorderRef.current = null;
+      }
+
+      liveAPI.disconnect();
     }
   };
 
-  const handleSendMessage = async (text: string) => {
-    // Add user message immediately
-    const newMessages = [...messages, { role: "user" as const, content: text }];
-    setMessages(newMessages);
-    setTranscript("");
-    setIsProcessing(true);
-
-    try {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: newMessages,
-          currentVenues: currentVenues,
-        }),
-      });
-
-      if (!response.ok) throw new Error("Failed to get response");
-
-      const data = await response.json();
-      // Expecting { text: string, data?: any, type?: 'text'|'images'|'reviews' }
-      const agentResponseText = data.text;
-      const agentData = data.data;
-      const agentType = data.type || "text";
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "agent",
-          content: agentResponseText,
-          data: agentData,
-          type: agentType,
-        },
-      ]);
-
-      speak(agentResponseText);
-    } catch (error) {
-      console.error("Chat error:", error);
-      speak("Sorry, I had trouble verifying that vibe. Try again?");
-    } finally {
-      setIsProcessing(false);
+  useEffect(() => {
+    if (liveAPI.isStreaming) {
+      setStatusText("Agent speaking...");
+    } else if (liveAPI.isConnected && isActive) {
+      setStatusText("Listening...");
     }
-  };
+  }, [liveAPI.isStreaming, liveAPI.isConnected, isActive]);
 
   if (!isOpen) {
     return (
@@ -311,12 +216,14 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
                 fontWeight: 600,
               }}
             >
-              Vibe Confidant
+              Vibe Confidant (Live)
             </h3>
           </div>
           <button
             onClick={() => {
-              synthesisRef.current?.cancel();
+              if (isActive) {
+                toggleLiveChat();
+              }
               setIsOpen(false);
             }}
             style={{
@@ -365,7 +272,18 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
                   margin: 0,
                 }}
               >
-                Tap the mic and ask me anything about these venues!
+                Tap the mic to start a live conversation!
+              </p>
+              <p
+                style={{
+                  color: "var(--text-secondary)",
+                  textAlign: "center",
+                  fontSize: "0.75rem",
+                  margin: 0,
+                  fontStyle: "italic",
+                }}
+              >
+                Powered by Gemini Live API
               </p>
             </div>
           )}
@@ -396,130 +314,11 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
                 )}
                 {msg.content}
               </div>
-
-              {/* RENDER IMAGES - CAROUSEL / SLIDER */}
-              {msg.type === "images" && msg.data && Array.isArray(msg.data) && (
-                <div
-                  style={{
-                    display: "flex",
-                    overflowX: "auto",
-                    gap: "8px",
-                    marginTop: "8px",
-                    paddingBottom: "8px",
-                    scrollBehavior: "smooth",
-                    scrollbarWidth: "thin",
-                  }}
-                >
-                  {msg.data.map((url: string, imgIdx: number) => (
-                    <motion.img
-                      initial={{ opacity: 0, scale: 0.9 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      transition={{ delay: imgIdx * 0.1 }}
-                      key={imgIdx}
-                      src={url}
-                      alt="Venue visual"
-                      style={{
-                        minWidth: "150px",
-                        height: "120px",
-                        objectFit: "cover",
-                        borderRadius: "8px",
-                      }}
-                    />
-                  ))}
-                </div>
-              )}
-
-              {/* RENDER REVIEWS */}
-              {msg.type === "reviews" &&
-                msg.data &&
-                Array.isArray(msg.data) && (
-                  <div
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: "8px",
-                      marginTop: "8px",
-                    }}
-                  >
-                    {msg.data.map((review: any, rIdx: number) => (
-                      <div
-                        key={rIdx}
-                        style={{
-                          background: "rgba(0,0,0,0.3)",
-                          padding: "8px",
-                          borderRadius: "8px",
-                          fontSize: "0.85rem",
-                          fontStyle: "italic",
-                          borderLeft: "2px solid var(--accent-gold)",
-                        }}
-                      >
-                        "{review.snippet}"
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-              {/* RENDER WEB RESULTS */}
-              {msg.type === "web_results" &&
-                msg.data &&
-                Array.isArray(msg.data) && (
-                  <div
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: "8px",
-                      marginTop: "8px",
-                    }}
-                  >
-                    {msg.data.map((res: any, rIdx: number) => (
-                      <a
-                        key={rIdx}
-                        href={res.link}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style={{
-                          display: "block",
-                          background: "rgba(255,255,255,0.05)",
-                          padding: "10px",
-                          borderRadius: "8px",
-                          textDecoration: "none",
-                          color: "inherit",
-                          border: "1px solid var(--glass-border)",
-                        }}
-                      >
-                        <div
-                          style={{
-                            fontWeight: "bold",
-                            color: "var(--accent-gold)",
-                            fontSize: "0.9rem",
-                            marginBottom: "4px",
-                          }}
-                        >
-                          {res.title}
-                        </div>
-                        <div
-                          style={{
-                            fontSize: "0.8rem",
-                            color: "var(--text-secondary)",
-                            display: "-webkit-box",
-                            WebkitLineClamp: 2,
-                            WebkitBoxOrient: "vertical",
-                            overflow: "hidden",
-                          }}
-                        >
-                          {res.snippet}
-                        </div>
-                      </a>
-                    ))}
-                  </div>
-                )}
             </motion.div>
           ))}
-          {/* Scroll anchor */}
-          <div id="scroll-anchor" />
         </div>
 
-        {/* Status & Visualizer */}
+        {/* Status & Controls */}
         <div
           style={{
             minHeight: "80px",
@@ -530,18 +329,10 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
             paddingBottom: "10px",
           }}
         >
-          {/* Dynamic Status Text */}
+          {/* Status Text */}
           <AnimatePresence mode="wait">
             <motion.p
-              key={
-                isListening
-                  ? "list"
-                  : isProcessing
-                  ? "proc"
-                  : isSpeaking
-                  ? "speak"
-                  : "idle"
-              }
+              key={statusText}
               initial={{ opacity: 0, y: 5 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -5 }}
@@ -552,63 +343,59 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
                 height: "1rem",
               }}
             >
-              {isListening
-                ? "Listening..."
-                : isProcessing
-                ? "Analyzing the vibe..."
-                : isSpeaking
-                ? "Speaking..."
-                : transcript
-                ? "Processing..."
-                : ""}
+              {statusText}
             </motion.p>
           </AnimatePresence>
 
-          {/* Controls */}
+          {/* Mic Button */}
           <button
-            onClick={toggleListening}
+            onClick={toggleLiveChat}
             style={{
               width: "60px",
               height: "60px",
               borderRadius: "50%",
-              background: isListening
+              background: isActive
                 ? "#ff4444"
-                : isProcessing
-                ? "var(--text-secondary)"
+                : liveAPI.error
+                ? "#888"
                 : "var(--accent-gold)",
               color: "var(--bg-primary)",
               border: "none",
               fontSize: "1.5rem",
-              cursor: isProcessing ? "default" : "pointer",
+              cursor: "pointer",
               transition: "all 0.3s ease",
-              boxShadow: isListening
+              boxShadow: isActive
                 ? "0 0 25px rgba(255, 68, 68, 0.6)"
                 : "0 4px 15px rgba(201, 160, 80, 0.3)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              transform: isListening ? "scale(1.1)" : "scale(1)",
+              transform: isActive ? "scale(1.1)" : "scale(1)",
             }}
-            disabled={isProcessing}
           >
-            {isListening ? (
+            {isActive ? (
               <motion.div
                 animate={{ scale: [1, 1.2, 1] }}
                 transition={{ repeat: Infinity, duration: 1.5 }}
               >
                 ⏹
               </motion.div>
-            ) : isProcessing ? (
-              <motion.div
-                animate={{ rotate: 360 }}
-                transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
-              >
-                ⏳
-              </motion.div>
             ) : (
               "🎤"
             )}
           </button>
+
+          {liveAPI.error && (
+            <p
+              style={{
+                color: "#ff4444",
+                fontSize: "0.7rem",
+                marginTop: "8px",
+              }}
+            >
+              {liveAPI.error}
+            </p>
+          )}
         </div>
       </motion.div>
     </AnimatePresence>
