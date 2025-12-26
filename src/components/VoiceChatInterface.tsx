@@ -3,8 +3,6 @@
 import { useState, useEffect, useRef } from "react";
 import { Venue } from "@/lib/agent/types";
 import { motion, AnimatePresence } from "framer-motion";
-import { useLiveAPI } from "@/hooks/useLiveAPI";
-import { AudioRecorder } from "@/utils/audioRecorder";
 
 interface Props {
   currentVenues: Venue[];
@@ -74,18 +72,80 @@ const BrainProcess = ({ thoughts }: { thoughts: string }) => {
 
 export default function VoiceChatInterface({ currentVenues }: Props) {
   const [isOpen, setIsOpen] = useState(false);
-  const [isActive, setIsActive] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [statusText, setStatusText] = useState("");
+  const [transcript, setTranscript] = useState("");
+  const [selectedVoice, setSelectedVoice] =
+    useState<SpeechSynthesisVoice | null>(null);
 
+  const recognitionRef = useRef<any>(null);
+  const synthesisRef = useRef<SpeechSynthesis | null>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
-  const audioRecorderRef = useRef<AudioRecorder | null>(null);
 
-  const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || "";
+  // Initialize TTS and STT
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      // Setup TTS
+      synthesisRef.current = window.speechSynthesis;
 
-  const liveAPI = useLiveAPI({ apiKey });
+      const loadVoices = () => {
+        const voices = synthesisRef.current?.getVoices() || [];
+        // Try to find a nice natural voice
+        const preferredVoice =
+          voices.find(
+            (v) =>
+              v.name.includes("Google US English") ||
+              v.name.includes("Samantha") ||
+              v.name.includes("Microsoft Zira")
+          ) || voices[0];
+        setSelectedVoice(preferredVoice);
+      };
 
-  // Auto-scroll to bottom of chat
+      loadVoices();
+      if (synthesisRef.current) {
+        synthesisRef.current.onvoiceschanged = loadVoices;
+      }
+
+      // Setup STT
+      const SpeechRecognition =
+        (window as any).SpeechRecognition ||
+        (window as any).webkitSpeechRecognition;
+
+      if (SpeechRecognition) {
+        recognitionRef.current = new SpeechRecognition();
+        recognitionRef.current.continuous = false;
+        recognitionRef.current.interimResults = false;
+
+        recognitionRef.current.onresult = (event: any) => {
+          const transcript = event.results[0][0].transcript;
+          setTranscript(transcript);
+          handleUserMessage(transcript);
+        };
+
+        recognitionRef.current.onend = () => {
+          setIsListening(false);
+        };
+
+        recognitionRef.current.onerror = (event: any) => {
+          console.error("Speech recognition error:", event.error);
+          setIsListening(false);
+        };
+      }
+    }
+
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      if (synthesisRef.current) {
+        synthesisRef.current.cancel();
+      }
+    };
+  }, []);
+
+  // Auto-scroll to bottom
   useEffect(() => {
     if (chatContainerRef.current) {
       chatContainerRef.current.scrollTop =
@@ -93,53 +153,92 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
     }
   }, [messages]);
 
-  const toggleLiveChat = async () => {
-    if (!isActive) {
-      // Start Live API session
-      if (!apiKey) {
-        alert("Please add NEXT_PUBLIC_GEMINI_API_KEY to your .env.local file");
-        return;
-      }
+  const speak = (text: string) => {
+    if (!synthesisRef.current) return;
 
-      setStatusText("Connecting...");
-      liveAPI.connect();
+    // Cancel current speech
+    synthesisRef.current.cancel();
 
-      // Wait a moment for connection
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+    // Strip markdown (asterisks, etc) for cleaner speech
+    const cleanText = text.replace(/[*#_`]/g, "");
 
-      if (liveAPI.isConnected) {
-        setStatusText("Listening...");
-        setIsActive(true);
+    const utterance = new SpeechSynthesisUtterance(cleanText);
+    if (selectedVoice) {
+      utterance.voice = selectedVoice;
+    }
+    utterance.pitch = 1.0;
+    utterance.rate = 1.0;
+    utterance.volume = 1.0;
 
-        // Start audio recording
-        audioRecorderRef.current = new AudioRecorder();
-        await audioRecorderRef.current.start((audioData) => {
-          liveAPI.sendAudio(audioData);
-        });
-      } else {
-        setStatusText("Connection failed");
-      }
-    } else {
-      // Stop Live API session
-      setStatusText("");
-      setIsActive(false);
+    utterance.onstart = () => setIsSpeaking(true);
+    utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
 
-      if (audioRecorderRef.current) {
-        audioRecorderRef.current.stop();
-        audioRecorderRef.current = null;
-      }
+    synthesisRef.current.speak(utterance);
+  };
 
-      liveAPI.disconnect();
+  const handleUserMessage = async (userText: string) => {
+    const userMessage: Message = {
+      role: "user",
+      content: userText,
+    };
+
+    setMessages((prev) => [...prev, userMessage]);
+    setIsProcessing(true);
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [...messages, userMessage].map((m) => ({
+            role: m.role,
+            content: m.content,
+          })),
+          currentVenues,
+        }),
+      });
+
+      const data = await response.json();
+
+      const agentMessage: Message = {
+        role: "agent",
+        content: data.text,
+        data: data.data,
+        type: data.type || "text",
+        thoughts: data.thoughts,
+      };
+
+      setMessages((prev) => [...prev, agentMessage]);
+      speak(data.text);
+    } catch (error) {
+      console.error("Chat error:", error);
+      const errorMessage: Message = {
+        role: "agent",
+        content: "Sorry, I encountered an error. Please try again.",
+      };
+      setMessages((prev) => [...prev, errorMessage]);
+      speak(errorMessage.content);
+    } finally {
+      setIsProcessing(false);
     }
   };
 
-  useEffect(() => {
-    if (liveAPI.isStreaming) {
-      setStatusText("Agent speaking...");
-    } else if (liveAPI.isConnected && isActive) {
-      setStatusText("Listening...");
+  const toggleListening = () => {
+    if (!recognitionRef.current) {
+      alert("Speech recognition not supported in this browser");
+      return;
     }
-  }, [liveAPI.isStreaming, liveAPI.isConnected, isActive]);
+
+    if (isListening) {
+      recognitionRef.current.stop();
+      setIsListening(false);
+    } else {
+      recognitionRef.current.start();
+      setIsListening(true);
+      setTranscript("");
+    }
+  };
 
   if (!isOpen) {
     return (
@@ -216,16 +315,11 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
                 fontWeight: 600,
               }}
             >
-              Vibe Confidant (Live)
+              Vibe Confidant
             </h3>
           </div>
           <button
-            onClick={() => {
-              if (isActive) {
-                toggleLiveChat();
-              }
-              setIsOpen(false);
-            }}
+            onClick={() => setIsOpen(false)}
             style={{
               background: "transparent",
               border: "none",
@@ -238,7 +332,7 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
           </button>
         </div>
 
-        {/* Chat History */}
+        {/* Chat Messages */}
         <div
           ref={chatContainerRef}
           style={{
@@ -272,18 +366,7 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
                   margin: 0,
                 }}
               >
-                Tap the mic to start a live conversation!
-              </p>
-              <p
-                style={{
-                  color: "var(--text-secondary)",
-                  textAlign: "center",
-                  fontSize: "0.75rem",
-                  margin: 0,
-                  fontStyle: "italic",
-                }}
-              >
-                Powered by Gemini Live API
+                Tap the mic and ask me anything about these venues!
               </p>
             </div>
           )}
@@ -314,11 +397,137 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
                 )}
                 {msg.content}
               </div>
+
+              {/* RENDER IMAGES - CAROUSEL */}
+              {msg.type === "images" && msg.data && Array.isArray(msg.data) && (
+                <div
+                  style={{
+                    display: "flex",
+                    overflowX: "auto",
+                    gap: "8px",
+                    marginTop: "8px",
+                    paddingBottom: "8px",
+                    scrollBehavior: "smooth",
+                    scrollbarWidth: "thin",
+                  }}
+                >
+                  {msg.data.map((url: string, imgIdx: number) => (
+                    <motion.img
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      transition={{ delay: imgIdx * 0.1 }}
+                      key={imgIdx}
+                      src={url}
+                      alt="Venue visual"
+                      style={{
+                        minWidth: "150px",
+                        height: "120px",
+                        objectFit: "cover",
+                        borderRadius: "8px",
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* RENDER REVIEWS */}
+              {msg.type === "reviews" &&
+                msg.data &&
+                Array.isArray(msg.data) && (
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "8px",
+                      marginTop: "8px",
+                    }}
+                  >
+                    {msg.data.map((review: any, rIdx: number) => (
+                      <div
+                        key={rIdx}
+                        style={{
+                          background: "rgba(255,255,255,0.05)",
+                          padding: "8px",
+                          borderRadius: "8px",
+                          fontSize: "0.85rem",
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontWeight: "bold",
+                            marginBottom: "4px",
+                            color: "var(--accent-gold)",
+                          }}
+                        >
+                          {review.title}
+                        </div>
+                        <div style={{ color: "var(--text-secondary)" }}>
+                          {review.snippet}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+              {/* RENDER WEB RESULTS */}
+              {msg.type === "web_results" &&
+                msg.data &&
+                Array.isArray(msg.data) && (
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "8px",
+                      marginTop: "8px",
+                    }}
+                  >
+                    {msg.data.map((res: any, rIdx: number) => (
+                      <a
+                        key={rIdx}
+                        href={res.link}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{
+                          display: "block",
+                          background: "rgba(255,255,255,0.05)",
+                          padding: "10px",
+                          borderRadius: "8px",
+                          textDecoration: "none",
+                          color: "inherit",
+                          border: "1px solid var(--glass-border)",
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontWeight: "bold",
+                            color: "var(--accent-gold)",
+                            fontSize: "0.9rem",
+                            marginBottom: "4px",
+                          }}
+                        >
+                          {res.title}
+                        </div>
+                        <div
+                          style={{
+                            fontSize: "0.8rem",
+                            color: "var(--text-secondary)",
+                            display: "-webkit-box",
+                            WebkitLineClamp: 2,
+                            WebkitBoxOrient: "vertical",
+                            overflow: "hidden",
+                          }}
+                        >
+                          {res.snippet}
+                        </div>
+                      </a>
+                    ))}
+                  </div>
+                )}
             </motion.div>
           ))}
         </div>
 
-        {/* Status & Controls */}
+        {/* Controls */}
         <div
           style={{
             minHeight: "80px",
@@ -332,7 +541,15 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
           {/* Status Text */}
           <AnimatePresence mode="wait">
             <motion.p
-              key={statusText}
+              key={
+                isListening
+                  ? "listening"
+                  : isProcessing
+                  ? "processing"
+                  : isSpeaking
+                  ? "speaking"
+                  : "idle"
+              }
               initial={{ opacity: 0, y: 5 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -5 }}
@@ -343,37 +560,41 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
                 height: "1rem",
               }}
             >
-              {statusText}
+              {isListening
+                ? "Listening..."
+                : isProcessing
+                ? "Thinking..."
+                : isSpeaking
+                ? "Speaking..."
+                : ""}
             </motion.p>
           </AnimatePresence>
 
           {/* Mic Button */}
           <button
-            onClick={toggleLiveChat}
+            onClick={toggleListening}
+            disabled={isProcessing || isSpeaking}
             style={{
               width: "60px",
               height: "60px",
               borderRadius: "50%",
-              background: isActive
+              background: isListening
                 ? "#ff4444"
-                : liveAPI.error
+                : isProcessing || isSpeaking
                 ? "#888"
                 : "var(--accent-gold)",
               color: "var(--bg-primary)",
               border: "none",
               fontSize: "1.5rem",
-              cursor: "pointer",
+              cursor: isProcessing || isSpeaking ? "not-allowed" : "pointer",
               transition: "all 0.3s ease",
-              boxShadow: isActive
+              boxShadow: isListening
                 ? "0 0 25px rgba(255, 68, 68, 0.6)"
                 : "0 4px 15px rgba(201, 160, 80, 0.3)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              transform: isActive ? "scale(1.1)" : "scale(1)",
+              transform: isListening ? "scale(1.1)" : "scale(1)",
             }}
           >
-            {isActive ? (
+            {isListening ? (
               <motion.div
                 animate={{ scale: [1, 1.2, 1] }}
                 transition={{ repeat: Infinity, duration: 1.5 }}
@@ -384,18 +605,6 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
               "🎤"
             )}
           </button>
-
-          {liveAPI.error && (
-            <p
-              style={{
-                color: "#ff4444",
-                fontSize: "0.7rem",
-                marginTop: "8px",
-              }}
-            >
-              {liveAPI.error}
-            </p>
-          )}
         </div>
       </motion.div>
     </AnimatePresence>
