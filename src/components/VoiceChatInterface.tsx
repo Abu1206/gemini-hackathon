@@ -16,142 +16,132 @@ interface Message {
   thoughts?: string;
 }
 
-const BrainProcess = ({ thoughts }: { thoughts: string }) => {
-  const [isExpanded, setIsExpanded] = useState(false);
+// Voice Activity Visualization Component
+const VoiceActivityBar = ({ 
+  isActive, 
+  transcript 
+}: { 
+  isActive: boolean; 
+  transcript: string;
+}) => {
+  const [audioLevel, setAudioLevel] = useState(0);
 
-  if (!thoughts) return null;
+  useEffect(() => {
+    if (!isActive) {
+      setAudioLevel(0);
+      return;
+    }
+
+    // Simulate audio level animation
+    const interval = setInterval(() => {
+      setAudioLevel(Math.random() * 100);
+    }, 100);
+
+    return () => clearInterval(interval);
+  }, [isActive]);
+
+  if (!isActive && !transcript) return null;
 
   return (
-    <div style={{ marginBottom: "8px", width: "100%" }}>
-      <button
-        onClick={() => setIsExpanded(!isExpanded)}
-        style={{
-          background: "rgba(0, 255, 170, 0.1)",
-          border: "1px solid rgba(0, 255, 170, 0.3)",
-          color: "rgba(0, 255, 170, 0.8)",
-          padding: "4px 8px",
-          borderRadius: "4px",
-          fontSize: "0.75rem",
-          cursor: "pointer",
-          display: "flex",
-          alignItems: "center",
-          gap: "6px",
-          width: "100%",
-          textAlign: "left",
-          fontFamily: "monospace",
-        }}
-      >
-        <span>{isExpanded ? "▼" : "▶"}</span>
-        <span>Reasoning Process</span>
-      </button>
-      {isExpanded && (
-        <motion.div
-          initial={{ opacity: 0, height: 0 }}
-          animate={{ opacity: 1, height: "auto" }}
-          style={{
-            background: "rgba(0, 0, 0, 0.3)",
-            border: "1px solid rgba(0, 255, 170, 0.1)",
-            borderTop: "none",
-            borderRadius: "0 0 4px 4px",
-            padding: "8px",
-            fontSize: "0.75rem",
-            color: "rgba(0, 255, 170, 0.7)",
-            fontFamily: "monospace",
-            whiteSpace: "pre-wrap",
-            overflowX: "hidden",
-            maxHeight: "200px",
-            overflowY: "auto",
-          }}
-        >
-          {thoughts}
-        </motion.div>
-      )}
-    </div>
+    <motion.div
+      initial={{ y: -100, opacity: 0 }}
+      animate={{ y: 0, opacity: 1 }}
+      exit={{ y: -100, opacity: 0 }}
+      style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
+        background: "rgba(10, 10, 12, 0.98)",
+        backdropFilter: "blur(20px)",
+        borderBottom: "1px solid var(--glass-border)",
+        zIndex: 10000,
+        padding: "16px 24px",
+        boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+        {/* Voice Activity Visualization */}
+        {isActive && (
+          <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+            {Array.from({ length: 20 }).map((_, i) => {
+              const height = isActive
+                ? Math.max(4, (audioLevel / 100) * 30 * Math.random())
+                : 4;
+              return (
+                <motion.div
+                  key={i}
+                  animate={{
+                    height: `${height}px`,
+                    opacity: isActive ? 0.8 : 0.3,
+                  }}
+                  transition={{ duration: 0.1 }}
+                  style={{
+                    width: "3px",
+                    background: "var(--accent-gold)",
+                    borderRadius: "2px",
+                    minHeight: "4px",
+                  }}
+                />
+              );
+            })}
+          </div>
+        )}
+
+        {/* Transcript Display */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {transcript ? (
+            <motion.p
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              style={{
+                margin: 0,
+                color: "var(--text-primary)",
+                fontSize: "1rem",
+                fontWeight: 500,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {transcript}
+            </motion.p>
+          ) : isActive ? (
+            <p
+              style={{
+                margin: 0,
+                color: "var(--text-secondary)",
+                fontSize: "0.9rem",
+                fontStyle: "italic",
+              }}
+            >
+              Listening...
+            </p>
+          ) : null}
+        </div>
+      </div>
+    </motion.div>
   );
 };
 
 export default function VoiceChatInterface({ currentVenues }: Props) {
-  const [isOpen, setIsOpen] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [messages, setMessages] = useState<Message[]>([]);
   const [transcript, setTranscript] = useState("");
+  const [interimTranscript, setInterimTranscript] = useState("");
+  const [currentResult, setCurrentResult] = useState<Message | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [selectedVoice, setSelectedVoice] =
     useState<SpeechSynthesisVoice | null>(null);
 
   const recognitionRef = useRef<any>(null);
   const synthesisRef = useRef<SpeechSynthesis | null>(null);
-  const chatContainerRef = useRef<HTMLDivElement>(null);
-
-  // Initialize TTS and STT
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      // Setup TTS
-      synthesisRef.current = window.speechSynthesis;
-
-      const loadVoices = () => {
-        const voices = synthesisRef.current?.getVoices() || [];
-        // Try to find a nice natural voice
-        const preferredVoice =
-          voices.find(
-            (v) =>
-              v.name.includes("Google US English") ||
-              v.name.includes("Samantha") ||
-              v.name.includes("Microsoft Zira")
-          ) || voices[0];
-        setSelectedVoice(preferredVoice);
-      };
-
-      loadVoices();
-      if (synthesisRef.current) {
-        synthesisRef.current.onvoiceschanged = loadVoices;
-      }
-
-      // Setup STT
-      const SpeechRecognition =
-        (window as any).SpeechRecognition ||
-        (window as any).webkitSpeechRecognition;
-
-      if (SpeechRecognition) {
-        recognitionRef.current = new SpeechRecognition();
-        recognitionRef.current.continuous = false;
-        recognitionRef.current.interimResults = false;
-
-        recognitionRef.current.onresult = (event: any) => {
-          const transcript = event.results[0][0].transcript;
-          setTranscript(transcript);
-          handleUserMessage(transcript);
-        };
-
-        recognitionRef.current.onend = () => {
-          setIsListening(false);
-        };
-
-        recognitionRef.current.onerror = (event: any) => {
-          console.error("Speech recognition error:", event.error);
-          setIsListening(false);
-        };
-      }
-    }
-
-    return () => {
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
-      }
-      if (synthesisRef.current) {
-        synthesisRef.current.cancel();
-      }
-    };
-  }, []);
-
-  // Auto-scroll to bottom
-  useEffect(() => {
-    if (chatContainerRef.current) {
-      chatContainerRef.current.scrollTop =
-        chatContainerRef.current.scrollHeight;
-    }
-  }, [messages]);
+  const finalTranscriptRef = useRef("");
+  const interimTranscriptRef = useRef("");
+  const handleUserMessageRef = useRef<((text: string) => Promise<void>) | null>(null);
+  const currentResultRef = useRef<Message | null>(null);
+  const currentVenuesRef = useRef<Venue[]>(currentVenues);
 
   const speak = (text: string) => {
     if (!synthesisRef.current) return;
@@ -178,24 +168,20 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
   };
 
   const handleUserMessage = async (userText: string) => {
-    const userMessage: Message = {
-      role: "user",
-      content: userText,
-    };
+    if (!userText.trim()) return;
 
-    setMessages((prev) => [...prev, userMessage]);
     setIsProcessing(true);
+    setTranscript("");
 
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          messages: [...messages, userMessage].map((m) => ({
-            role: m.role,
-            content: m.content,
-          })),
-          currentVenues,
+          messages: [
+            { role: "user" as const, content: userText },
+          ],
+          currentVenues: currentVenuesRef.current,
         }),
       });
 
@@ -209,7 +195,8 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
         thoughts: data.thoughts,
       };
 
-      setMessages((prev) => [...prev, agentMessage]);
+      setCurrentResult(agentMessage);
+      currentResultRef.current = agentMessage;
       speak(data.text);
     } catch (error) {
       console.error("Chat error:", error);
@@ -217,12 +204,151 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
         role: "agent",
         content: "Sorry, I encountered an error. Please try again.",
       };
-      setMessages((prev) => [...prev, errorMessage]);
+      setCurrentResult(errorMessage);
+      currentResultRef.current = errorMessage;
       speak(errorMessage.content);
     } finally {
       setIsProcessing(false);
     }
   };
+
+  // Store handler in ref for use in useEffect
+  handleUserMessageRef.current = handleUserMessage;
+
+  // Keep refs in sync
+  useEffect(() => {
+    currentResultRef.current = currentResult;
+  }, [currentResult]);
+
+  useEffect(() => {
+    currentVenuesRef.current = currentVenues;
+  }, [currentVenues]);
+
+  // Initialize TTS and STT
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      // Setup TTS
+      synthesisRef.current = window.speechSynthesis;
+
+      const loadVoices = () => {
+        const voices = synthesisRef.current?.getVoices() || [];
+        // Try to find a nice natural voice
+        const preferredVoice =
+          voices.find(
+            (v) =>
+              v.name.includes("Google US English") ||
+              v.name.includes("Samantha") ||
+              v.name.includes("Microsoft Zira")
+          ) || voices[0];
+        setSelectedVoice(preferredVoice);
+      };
+
+      loadVoices();
+      if (synthesisRef.current) {
+        synthesisRef.current.onvoiceschanged = loadVoices;
+      }
+
+      // Setup STT with interim results for real-time transcript
+      const SpeechRecognition =
+        (window as any).SpeechRecognition ||
+        (window as any).webkitSpeechRecognition;
+
+      if (SpeechRecognition) {
+        recognitionRef.current = new SpeechRecognition();
+        recognitionRef.current.continuous = true;
+        recognitionRef.current.interimResults = true;
+        recognitionRef.current.lang = "en-US";
+
+        recognitionRef.current.onresult = (event: any) => {
+          let interim = "";
+          let final = "";
+
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            const transcript = event.results[i][0].transcript;
+            if (event.results[i].isFinal) {
+              final += transcript + " ";
+            } else {
+              interim += transcript;
+            }
+          }
+
+          if (interim) {
+            interimTranscriptRef.current = interim;
+            setInterimTranscript(interim);
+          }
+
+          if (final) {
+            finalTranscriptRef.current += final;
+            setTranscript(finalTranscriptRef.current);
+            setInterimTranscript("");
+            interimTranscriptRef.current = "";
+          }
+        };
+
+        recognitionRef.current.onend = () => {
+          setIsListening(false);
+          // Process the final transcript if we have one
+          const finalText = (
+            finalTranscriptRef.current + " " + interimTranscriptRef.current
+          ).trim();
+          if (finalText && handleUserMessageRef.current) {
+            handleUserMessageRef.current(finalText);
+          }
+          finalTranscriptRef.current = "";
+          interimTranscriptRef.current = "";
+          setTranscript("");
+          setInterimTranscript("");
+        };
+
+        recognitionRef.current.onerror = (event: any) => {
+          console.error("Speech recognition error:", event.error);
+          setIsListening(false);
+          finalTranscriptRef.current = "";
+          interimTranscriptRef.current = "";
+          setTranscript("");
+          setInterimTranscript("");
+
+          // Handle different error types with user-friendly messages
+          let errorMessage = "Speech recognition error occurred.";
+          switch (event.error) {
+            case "network":
+              errorMessage = "Network error: Please check your internet connection and try again.";
+              break;
+            case "no-speech":
+              errorMessage = "No speech detected. Please try speaking again.";
+              break;
+            case "audio-capture":
+              errorMessage = "Microphone not found or not accessible. Please check your microphone permissions.";
+              break;
+            case "not-allowed":
+              errorMessage = "Microphone permission denied. Please allow microphone access in your browser settings.";
+              break;
+            case "aborted":
+              // User stopped manually, don't show error
+              return;
+            case "service-not-allowed":
+              errorMessage = "Speech recognition service not available. Please try again later.";
+              break;
+            default:
+              errorMessage = `Speech recognition error: ${event.error}. Please try again.`;
+          }
+          
+          setError(errorMessage);
+          // Auto-dismiss error after 5 seconds
+          setTimeout(() => setError(null), 5000);
+        };
+      }
+    }
+
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      if (synthesisRef.current) {
+        synthesisRef.current.cancel();
+      }
+    };
+  }, []);
 
   const toggleListening = () => {
     if (!recognitionRef.current) {
@@ -234,184 +360,185 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
       recognitionRef.current.stop();
       setIsListening(false);
     } else {
+      // Clear any previous errors when starting a new recording
+      setError(null);
       recognitionRef.current.start();
       setIsListening(true);
       setTranscript("");
+      setInterimTranscript("");
+      finalTranscriptRef.current = "";
+      interimTranscriptRef.current = "";
     }
   };
 
-  if (!isOpen) {
-    return (
-      <motion.button
-        whileHover={{ scale: 1.1 }}
-        whileTap={{ scale: 0.9 }}
-        onClick={() => setIsOpen(true)}
-        style={{
-          position: "fixed",
-          bottom: "30px",
-          right: "30px",
-          width: "60px",
-          height: "60px",
-          borderRadius: "50%",
-          background: "var(--accent-gold)",
-          color: "var(--bg-primary)",
-          border: "none",
-          boxShadow: "0 4px 20px rgba(201, 160, 80, 0.4)",
-          cursor: "pointer",
-          zIndex: 9999,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontSize: "1.5rem",
-        }}
-      >
-        🎤
-      </motion.button>
-    );
-  }
+  const displayTranscript = transcript || interimTranscript;
 
   return (
-    <AnimatePresence>
-      <motion.div
-        initial={{ opacity: 0, y: 50, scale: 0.9 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, scale: 0.9 }}
-        style={{
-          position: "fixed",
-          bottom: "30px",
-          right: "30px",
-          width: "90vw",
-          maxWidth: "400px",
-          height: "80vh",
-          maxHeight: "600px",
-          background: "rgba(10, 10, 12, 0.95)",
-          backdropFilter: "blur(20px)",
-          borderRadius: "24px",
-          border: "1px solid var(--glass-border)",
-          boxShadow: "0 10px 40px rgba(0,0,0,0.5)",
-          zIndex: 9999,
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-        }}
-      >
-        {/* Header */}
-        <div
+    <>
+      {/* Voice Activity Bar at Top */}
+      <VoiceActivityBar
+        isActive={isListening || isProcessing}
+        transcript={displayTranscript}
+      />
+
+      {/* Error Display */}
+      {error && (
+        <motion.div
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -20 }}
           style={{
-            padding: "16px",
-            borderBottom: "1px solid var(--glass-border)",
+            position: "fixed",
+            top: "80px",
+            left: "50%",
+            transform: "translateX(-50%)",
+            width: "90vw",
+            maxWidth: "500px",
+            background: "rgba(220, 38, 38, 0.95)",
+            backdropFilter: "blur(20px)",
+            borderRadius: "12px",
+            border: "1px solid rgba(220, 38, 38, 0.5)",
+            boxShadow: "0 10px 40px rgba(220, 38, 38, 0.3)",
+            zIndex: 10001,
+            padding: "16px 20px",
+            marginTop: "16px",
             display: "flex",
-            justifyContent: "space-between",
             alignItems: "center",
+            justifyContent: "space-between",
+            gap: "16px",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <span style={{ fontSize: "1.2rem" }}>✨</span>
-            <h3
+          <div style={{ flex: 1 }}>
+            <div
               style={{
-                margin: 0,
-                fontSize: "1rem",
-                color: "var(--accent-gold)",
-                fontWeight: 600,
+                color: "#fff",
+                fontSize: "0.95rem",
+                fontWeight: 500,
+                marginBottom: "4px",
               }}
             >
-              Vibe Confidant
-            </h3>
+              ⚠️ Error
+            </div>
+            <div
+              style={{
+                color: "rgba(255, 255, 255, 0.9)",
+                fontSize: "0.85rem",
+                lineHeight: "1.4",
+              }}
+            >
+              {error}
+            </div>
           </div>
           <button
-            onClick={() => setIsOpen(false)}
+            onClick={() => setError(null)}
             style={{
               background: "transparent",
               border: "none",
-              color: "var(--text-secondary)",
+              color: "#fff",
               cursor: "pointer",
               fontSize: "1.2rem",
+              padding: "4px 8px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: "4px",
+              transition: "background 0.2s ease",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "rgba(255, 255, 255, 0.2)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "transparent";
             }}
           >
             ✕
           </button>
-        </div>
+        </motion.div>
+      )}
 
-        {/* Chat Messages */}
-        <div
-          ref={chatContainerRef}
+      {/* Results Display */}
+      {currentResult && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
           style={{
-            flex: 1,
-            overflowY: "auto",
-            padding: "16px",
-            display: "flex",
-            flexDirection: "column",
-            gap: "16px",
-            scrollBehavior: "smooth",
+            position: "fixed",
+            top: "80px",
+            left: "50%",
+            transform: "translateX(-50%)",
+            width: "90vw",
+            maxWidth: "800px",
+            background: "rgba(10, 10, 12, 0.95)",
+            backdropFilter: "blur(20px)",
+            borderRadius: "16px",
+            border: "1px solid var(--glass-border)",
+            boxShadow: "0 10px 40px rgba(0,0,0,0.5)",
+            zIndex: 9999,
+            padding: "24px",
+            marginTop: "16px",
           }}
         >
-          {messages.length === 0 && (
+          {/* Editable Result Content */}
+          <div style={{ marginBottom: "16px" }}>
             <div
               style={{
                 display: "flex",
-                flexDirection: "column",
+                justifyContent: "space-between",
                 alignItems: "center",
-                justifyContent: "center",
-                height: "100%",
-                opacity: 0.6,
-                gap: "10px",
+                marginBottom: "12px",
               }}
             >
-              <span style={{ fontSize: "2rem" }}>🎙️</span>
-              <p
+              <h3
                 style={{
-                  color: "var(--text-secondary)",
-                  textAlign: "center",
-                  fontSize: "0.9rem",
                   margin: 0,
+                  fontSize: "1.1rem",
+                  color: "var(--accent-gold)",
+                  fontWeight: 600,
                 }}
               >
-                Tap the mic and ask me anything about these venues!
-              </p>
+                Response
+              </h3>
+              <button
+                onClick={() => setCurrentResult(null)}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "var(--text-secondary)",
+                  cursor: "pointer",
+                  fontSize: "1.2rem",
+                  padding: "4px 8px",
+                }}
+              >
+                ✕
+              </button>
             </div>
-          )}
-          {messages.map((msg, i) => (
-            <motion.div
-              initial={{ opacity: 0, x: msg.role === "user" ? 20 : -20 }}
-              animate={{ opacity: 1, x: 0 }}
-              key={i}
+
+            <div
               style={{
-                alignSelf: msg.role === "user" ? "flex-end" : "flex-start",
-                background:
-                  msg.role === "user"
-                    ? "rgba(201, 160, 80, 0.2)"
-                    : "rgba(255, 255, 255, 0.05)",
-                color: msg.role === "user" ? "var(--text-primary)" : "#ddd",
-                padding: "12px 16px",
-                borderRadius: "16px",
-                borderBottomRightRadius: msg.role === "user" ? "4px" : "16px",
-                borderTopLeftRadius: msg.role === "agent" ? "4px" : "16px",
-                maxWidth: "90%",
-                fontSize: "0.95rem",
-                lineHeight: "1.5",
+                color: "var(--text-primary)",
+                fontSize: "1rem",
+                lineHeight: "1.6",
+                marginBottom: "16px",
               }}
             >
-              <div style={{ marginBottom: msg.data ? "8px" : "0" }}>
-                {msg.role === "agent" && msg.thoughts && (
-                  <BrainProcess thoughts={msg.thoughts} />
-                )}
-                {msg.content}
-              </div>
+              {currentResult.content}
+            </div>
 
-              {/* RENDER IMAGES - CAROUSEL */}
-              {msg.type === "images" && msg.data && Array.isArray(msg.data) && (
+            {/* RENDER IMAGES - CAROUSEL */}
+            {currentResult.type === "images" &&
+              currentResult.data &&
+              Array.isArray(currentResult.data) && (
                 <div
                   style={{
                     display: "flex",
                     overflowX: "auto",
-                    gap: "8px",
-                    marginTop: "8px",
+                    gap: "12px",
+                    marginTop: "16px",
                     paddingBottom: "8px",
                     scrollBehavior: "smooth",
-                    scrollbarWidth: "thin",
                   }}
                 >
-                  {msg.data.map((url: string, imgIdx: number) => (
+                  {currentResult.data.map((url: string, imgIdx: number) => (
                     <motion.img
                       initial={{ opacity: 0, scale: 0.9 }}
                       animate={{ opacity: 1, scale: 1 }}
@@ -420,8 +547,8 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
                       src={url}
                       alt="Venue visual"
                       style={{
-                        minWidth: "150px",
-                        height: "120px",
+                        minWidth: "200px",
+                        height: "150px",
                         objectFit: "cover",
                         borderRadius: "8px",
                       }}
@@ -430,183 +557,245 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
                 </div>
               )}
 
-              {/* RENDER REVIEWS */}
-              {msg.type === "reviews" &&
-                msg.data &&
-                Array.isArray(msg.data) && (
-                  <div
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: "8px",
-                      marginTop: "8px",
-                    }}
-                  >
-                    {msg.data.map((review: any, rIdx: number) => (
+            {/* RENDER REVIEWS */}
+            {currentResult.type === "reviews" &&
+              currentResult.data &&
+              Array.isArray(currentResult.data) && (
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "12px",
+                    marginTop: "16px",
+                  }}
+                >
+                  {currentResult.data.map((review: any, rIdx: number) => (
+                    <div
+                      key={rIdx}
+                      style={{
+                        background: "rgba(255,255,255,0.05)",
+                        padding: "12px",
+                        borderRadius: "8px",
+                        fontSize: "0.9rem",
+                      }}
+                    >
                       <div
-                        key={rIdx}
                         style={{
-                          background: "rgba(255,255,255,0.05)",
-                          padding: "8px",
-                          borderRadius: "8px",
-                          fontSize: "0.85rem",
+                          fontWeight: "bold",
+                          marginBottom: "6px",
+                          color: "var(--accent-gold)",
                         }}
                       >
-                        <div
-                          style={{
-                            fontWeight: "bold",
-                            marginBottom: "4px",
-                            color: "var(--accent-gold)",
-                          }}
-                        >
-                          {review.title}
-                        </div>
-                        <div style={{ color: "var(--text-secondary)" }}>
-                          {review.snippet}
-                        </div>
+                        {review.title}
                       </div>
-                    ))}
-                  </div>
-                )}
+                      <div style={{ color: "var(--text-secondary)" }}>
+                        {review.snippet}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
 
-              {/* RENDER WEB RESULTS */}
-              {msg.type === "web_results" &&
-                msg.data &&
-                Array.isArray(msg.data) && (
-                  <div
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: "8px",
-                      marginTop: "8px",
-                    }}
-                  >
-                    {msg.data.map((res: any, rIdx: number) => (
-                      <a
-                        key={rIdx}
-                        href={res.link}
-                        target="_blank"
-                        rel="noopener noreferrer"
+            {/* RENDER WEB RESULTS */}
+            {currentResult.type === "web_results" &&
+              currentResult.data &&
+              Array.isArray(currentResult.data) && (
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "12px",
+                    marginTop: "16px",
+                  }}
+                >
+                  {currentResult.data.map((res: any, rIdx: number) => (
+                    <a
+                      key={rIdx}
+                      href={res.link}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{
+                        display: "block",
+                        background: "rgba(255,255,255,0.05)",
+                        padding: "12px",
+                        borderRadius: "8px",
+                        textDecoration: "none",
+                        color: "inherit",
+                        border: "1px solid var(--glass-border)",
+                        transition: "all 0.2s ease",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background =
+                          "rgba(255,255,255,0.1)";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background =
+                          "rgba(255,255,255,0.05)";
+                      }}
+                    >
+                      <div
                         style={{
-                          display: "block",
-                          background: "rgba(255,255,255,0.05)",
-                          padding: "10px",
-                          borderRadius: "8px",
-                          textDecoration: "none",
-                          color: "inherit",
-                          border: "1px solid var(--glass-border)",
+                          fontWeight: "bold",
+                          color: "var(--accent-gold)",
+                          fontSize: "0.95rem",
+                          marginBottom: "6px",
                         }}
                       >
-                        <div
-                          style={{
-                            fontWeight: "bold",
-                            color: "var(--accent-gold)",
-                            fontSize: "0.9rem",
-                            marginBottom: "4px",
-                          }}
-                        >
-                          {res.title}
-                        </div>
-                        <div
-                          style={{
-                            fontSize: "0.8rem",
-                            color: "var(--text-secondary)",
-                            display: "-webkit-box",
-                            WebkitLineClamp: 2,
-                            WebkitBoxOrient: "vertical",
-                            overflow: "hidden",
-                          }}
-                        >
-                          {res.snippet}
-                        </div>
-                      </a>
-                    ))}
-                  </div>
-                )}
-            </motion.div>
-          ))}
-        </div>
+                        {res.title}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: "0.85rem",
+                          color: "var(--text-secondary)",
+                          display: "-webkit-box",
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: "vertical",
+                          overflow: "hidden",
+                        }}
+                      >
+                        {res.snippet}
+                      </div>
+                    </a>
+                  ))}
+                </div>
+              )}
 
-        {/* Controls */}
-        <div
-          style={{
-            minHeight: "80px",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            paddingBottom: "10px",
-          }}
-        >
-          {/* Status Text */}
-          <AnimatePresence mode="wait">
-            <motion.p
-              key={
-                isListening
-                  ? "listening"
-                  : isProcessing
-                  ? "processing"
-                  : isSpeaking
-                  ? "speaking"
-                  : "idle"
-              }
-              initial={{ opacity: 0, y: 5 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -5 }}
+            {/* Action Buttons */}
+            <div
               style={{
-                color: "var(--text-secondary)",
-                fontSize: "0.8rem",
-                marginBottom: "8px",
-                height: "1rem",
+                display: "flex",
+                gap: "12px",
+                marginTop: "20px",
+                paddingTop: "16px",
+                borderTop: "1px solid var(--glass-border)",
               }}
             >
-              {isListening
-                ? "Listening..."
-                : isProcessing
-                ? "Thinking..."
-                : isSpeaking
-                ? "Speaking..."
-                : ""}
-            </motion.p>
-          </AnimatePresence>
-
-          {/* Mic Button */}
-          <button
-            onClick={toggleListening}
-            disabled={isProcessing || isSpeaking}
-            style={{
-              width: "60px",
-              height: "60px",
-              borderRadius: "50%",
-              background: isListening
-                ? "#ff4444"
-                : isProcessing || isSpeaking
-                ? "#888"
-                : "var(--accent-gold)",
-              color: "var(--bg-primary)",
-              border: "none",
-              fontSize: "1.5rem",
-              cursor: isProcessing || isSpeaking ? "not-allowed" : "pointer",
-              transition: "all 0.3s ease",
-              boxShadow: isListening
-                ? "0 0 25px rgba(255, 68, 68, 0.6)"
-                : "0 4px 15px rgba(201, 160, 80, 0.3)",
-              transform: isListening ? "scale(1.1)" : "scale(1)",
-            }}
-          >
-            {isListening ? (
-              <motion.div
-                animate={{ scale: [1, 1.2, 1] }}
-                transition={{ repeat: Infinity, duration: 1.5 }}
+              <button
+                onClick={() => {
+                  if (currentResult) {
+                    handleUserMessage(
+                      "Can you modify or change the previous response?"
+                    );
+                  }
+                }}
+                style={{
+                  flex: 1,
+                  padding: "10px 16px",
+                  background: "rgba(201, 160, 80, 0.2)",
+                  border: "1px solid var(--accent-gold)",
+                  borderRadius: "8px",
+                  color: "var(--accent-gold)",
+                  cursor: "pointer",
+                  fontSize: "0.9rem",
+                  fontWeight: 500,
+                  transition: "all 0.2s ease",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "rgba(201, 160, 80, 0.3)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "rgba(201, 160, 80, 0.2)";
+                }}
               >
-                ⏹
-              </motion.div>
-            ) : (
-              "🎤"
-            )}
-          </button>
-        </div>
-      </motion.div>
-    </AnimatePresence>
+                Modify Response
+              </button>
+              <button
+                onClick={() => setCurrentResult(null)}
+                style={{
+                  padding: "10px 16px",
+                  background: "transparent",
+                  border: "1px solid var(--glass-border)",
+                  borderRadius: "8px",
+                  color: "var(--text-secondary)",
+                  cursor: "pointer",
+                  fontSize: "0.9rem",
+                  transition: "all 0.2s ease",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.borderColor = "var(--text-primary)";
+                  e.currentTarget.style.color = "var(--text-primary)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.borderColor = "var(--glass-border)";
+                  e.currentTarget.style.color = "var(--text-secondary)";
+                }}
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+        </motion.div>
+      )}
+
+      {/* Mic Button - Always Visible */}
+      <motion.button
+        whileHover={{ scale: 1.1 }}
+        whileTap={{ scale: 0.9 }}
+        onClick={toggleListening}
+        disabled={isProcessing || isSpeaking}
+        style={{
+          position: "fixed",
+          bottom: "30px",
+          right: "30px",
+          width: "60px",
+          height: "60px",
+          borderRadius: "50%",
+          background:
+            isListening
+              ? "#ff4444"
+              : isProcessing || isSpeaking
+              ? "#888"
+              : "var(--accent-gold)",
+          color: "var(--bg-primary)",
+          border: "none",
+          boxShadow: isListening
+            ? "0 0 25px rgba(255, 68, 68, 0.6)"
+            : "0 4px 20px rgba(201, 160, 80, 0.4)",
+          cursor: isProcessing || isSpeaking ? "not-allowed" : "pointer",
+          zIndex: 9999,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: "1.5rem",
+          transition: "all 0.3s ease",
+          transform: isListening ? "scale(1.1)" : "scale(1)",
+        }}
+      >
+        {isListening ? (
+          <motion.div
+            animate={{ scale: [1, 1.2, 1] }}
+            transition={{ repeat: Infinity, duration: 1.5 }}
+          >
+            ⏹
+          </motion.div>
+        ) : (
+          "🎤"
+        )}
+      </motion.button>
+
+      {/* Status Indicator */}
+      {(isProcessing || isSpeaking) && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          style={{
+            position: "fixed",
+            bottom: "100px",
+            right: "30px",
+            background: "rgba(10, 10, 12, 0.9)",
+            backdropFilter: "blur(10px)",
+            padding: "12px 20px",
+            borderRadius: "24px",
+            border: "1px solid var(--glass-border)",
+            color: "var(--text-secondary)",
+            fontSize: "0.9rem",
+            zIndex: 9998,
+          }}
+        >
+          {isProcessing ? "Processing..." : "Speaking..."}
+        </motion.div>
+      )}
+    </>
   );
 }
