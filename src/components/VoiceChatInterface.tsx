@@ -1,8 +1,10 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Venue } from "@/lib/agent/types";
 import { motion, AnimatePresence } from "framer-motion";
+import { useTwilioVoice } from "@/hooks/useTwilioVoice";
+import { useGeminiLive } from "@/hooks/useGeminiLive";
 
 interface Props {
   currentVenues: Venue[];
@@ -17,11 +19,11 @@ interface Message {
 }
 
 // Voice Activity Visualization Component
-const VoiceActivityBar = ({ 
-  isActive, 
-  transcript 
-}: { 
-  isActive: boolean; 
+const VoiceActivityBar = ({
+  isActive,
+  transcript,
+}: {
+  isActive: boolean;
   transcript: string;
 }) => {
   const [audioLevel, setAudioLevel] = useState(0);
@@ -88,7 +90,6 @@ const VoiceActivityBar = ({
           </div>
         )}
 
-        {/* Transcript Display */}
         <div style={{ flex: 1, minWidth: 0 }}>
           {transcript ? (
             <motion.p
@@ -125,614 +126,249 @@ const VoiceActivityBar = ({
 };
 
 export default function VoiceChatInterface({ currentVenues }: Props) {
-  const [isListening, setIsListening] = useState(false);
+  const [isInitialized, setIsInitialized] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
   const [transcript, setTranscript] = useState("");
-  const [interimTranscript, setInterimTranscript] = useState("");
   const [currentResult, setCurrentResult] = useState<Message | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [selectedVoice, setSelectedVoice] =
-    useState<SpeechSynthesisVoice | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
 
-  const recognitionRef = useRef<any>(null);
-  const synthesisRef = useRef<SpeechSynthesis | null>(null);
-  const finalTranscriptRef = useRef("");
-  const interimTranscriptRef = useRef("");
-  const handleUserMessageRef = useRef<((text: string) => Promise<void>) | null>(null);
-  const currentResultRef = useRef<Message | null>(null);
+  const fullTranscriptRef = useRef("");
   const currentVenuesRef = useRef<Venue[]>(currentVenues);
+  const audioBufferRef = useRef<ArrayBuffer[]>([]);
+  const isPlayingRef = useRef(false);
+  const geminiApiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || "";
 
-  const speak = (text: string) => {
-    if (!synthesisRef.current) return;
+  // Build system prompt
+  const systemPrompt = `You are a helpful travel assistant. You have information about these venues: ${JSON.stringify(
+    currentVenuesRef.current
+  )}. 
+  Provide recommendations, answer questions about venues, and help with travel planning. 
+  Keep responses concise and conversational. You can interrupt the user or be interrupted during the conversation.`;
 
-    // Cancel current speech
-    synthesisRef.current.cancel();
-
-    // Strip markdown (asterisks, etc) for cleaner speech
-    const cleanText = text.replace(/[*#_`]/g, "");
-
-    const utterance = new SpeechSynthesisUtterance(cleanText);
-    if (selectedVoice) {
-      utterance.voice = selectedVoice;
-    }
-    utterance.pitch = 1.0;
-    utterance.rate = 1.0;
-    utterance.volume = 1.0;
-
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
-
-    synthesisRef.current.speak(utterance);
-  };
-
-  const handleUserMessage = async (userText: string) => {
-    if (!userText.trim()) return;
-
-    setIsProcessing(true);
-    setTranscript("");
-
-    try {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: [
-            { role: "user" as const, content: userText },
-          ],
-          currentVenues: currentVenuesRef.current,
-        }),
-      });
-
-      const data = await response.json();
-
+  // Initialize Gemini Live connection
+  const {
+    isConnected: isGeminiConnected,
+    connect: connectGemini,
+    disconnect: disconnectGemini,
+    sendAudio: sendAudioToGemini,
+    completeTurn,
+    error: geminiError,
+  } = useGeminiLive({
+    apiKey: geminiApiKey,
+    systemPrompt,
+    onTranscript: (text) => {
+      fullTranscriptRef.current += text;
+      setTranscript(fullTranscriptRef.current);
+    },
+    onTextChunk: (text) => {
       const agentMessage: Message = {
         role: "agent",
-        content: data.text,
-        data: data.data,
-        type: data.type || "text",
-        thoughts: data.thoughts,
+        content: text,
+        type: "text",
       };
-
       setCurrentResult(agentMessage);
-      currentResultRef.current = agentMessage;
-      speak(data.text);
-    } catch (error) {
-      console.error("Chat error:", error);
-      const errorMessage: Message = {
-        role: "agent",
-        content: "Sorry, I encountered an error. Please try again.",
-      };
-      setCurrentResult(errorMessage);
-      currentResultRef.current = errorMessage;
-      speak(errorMessage.content);
-    } finally {
-      setIsProcessing(false);
-    }
-  };
+      setMessages((prev) => {
+        // Avoid duplicate messages
+        if (prev.length > 0 && prev[prev.length - 1].role === "agent") {
+          // Update last message if it's from agent
+          const updated = [...prev];
+          updated[updated.length - 1] = {
+            ...updated[updated.length - 1],
+            content: updated[updated.length - 1].content + text,
+          };
+          return updated;
+        }
+        return [...prev, agentMessage];
+      });
+    },
+    onAudioChunk: (audioData) => {
+      audioBufferRef.current.push(audioData);
+      playNextAudioChunk();
+    },
+  });
 
-  // Store handler in ref for use in useEffect
-  handleUserMessageRef.current = handleUserMessage;
+  // Initialize Twilio voice capture
+  const {
+    isListening,
+    startListening,
+    stopListening,
+    playAudio,
+    error: voiceError,
+  } = useTwilioVoice((audioData) => {
+    // Send audio directly to Gemini Live via WebSocket (real-time streaming)
+    if (isGeminiConnected) {
+      // Send audio chunk immediately for continuous streaming
+      sendAudioToGemini(audioData, false);
+    }
+  });
+
+  // Play audio queue from Gemini responses
+  const playNextAudioChunk = useCallback(() => {
+    if (isPlayingRef.current || audioBufferRef.current.length === 0) {
+      setIsSpeaking(audioBufferRef.current.length > 0);
+      return;
+    }
+
+    const audioData = audioBufferRef.current.shift()!;
+    isPlayingRef.current = true;
+    setIsSpeaking(true);
+
+    playAudio(audioData).finally(() => {
+      isPlayingRef.current = false;
+      // Play next chunk immediately for continuous playback
+      setTimeout(playNextAudioChunk, 10);
+    });
+  }, [playAudio]);
 
   // Keep refs in sync
-  useEffect(() => {
-    currentResultRef.current = currentResult;
-  }, [currentResult]);
-
   useEffect(() => {
     currentVenuesRef.current = currentVenues;
   }, [currentVenues]);
 
-  // Initialize TTS and STT
+  // Connect to Gemini when component mounts
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      // Setup TTS
-      synthesisRef.current = window.speechSynthesis;
-
-      const loadVoices = () => {
-        const voices = synthesisRef.current?.getVoices() || [];
-        // Try to find a nice natural voice
-        const preferredVoice =
-          voices.find(
-            (v) =>
-              v.name.includes("Google US English") ||
-              v.name.includes("Samantha") ||
-              v.name.includes("Microsoft Zira")
-          ) || voices[0];
-        setSelectedVoice(preferredVoice);
-      };
-
-      loadVoices();
-      if (synthesisRef.current) {
-        synthesisRef.current.onvoiceschanged = loadVoices;
-      }
-
-      // Setup STT with interim results for real-time transcript
-      const SpeechRecognition =
-        (window as any).SpeechRecognition ||
-        (window as any).webkitSpeechRecognition;
-
-      if (SpeechRecognition) {
-        recognitionRef.current = new SpeechRecognition();
-        recognitionRef.current.continuous = true;
-        recognitionRef.current.interimResults = true;
-        recognitionRef.current.lang = "en-US";
-
-        recognitionRef.current.onresult = (event: any) => {
-          let interim = "";
-          let final = "";
-
-          for (let i = event.resultIndex; i < event.results.length; i++) {
-            const transcript = event.results[i][0].transcript;
-            if (event.results[i].isFinal) {
-              final += transcript + " ";
-            } else {
-              interim += transcript;
-            }
-          }
-
-          if (interim) {
-            interimTranscriptRef.current = interim;
-            setInterimTranscript(interim);
-          }
-
-          if (final) {
-            finalTranscriptRef.current += final;
-            setTranscript(finalTranscriptRef.current);
-            setInterimTranscript("");
-            interimTranscriptRef.current = "";
-          }
-        };
-
-        recognitionRef.current.onend = () => {
-          setIsListening(false);
-          // Process the final transcript if we have one
-          const finalText = (
-            finalTranscriptRef.current + " " + interimTranscriptRef.current
-          ).trim();
-          if (finalText && handleUserMessageRef.current) {
-            handleUserMessageRef.current(finalText);
-          }
-          finalTranscriptRef.current = "";
-          interimTranscriptRef.current = "";
-          setTranscript("");
-          setInterimTranscript("");
-        };
-
-        recognitionRef.current.onerror = (event: any) => {
-          console.error("Speech recognition error:", event.error);
-          setIsListening(false);
-          finalTranscriptRef.current = "";
-          interimTranscriptRef.current = "";
-          setTranscript("");
-          setInterimTranscript("");
-
-          // Handle different error types with user-friendly messages
-          let errorMessage = "Speech recognition error occurred.";
-          switch (event.error) {
-            case "network":
-              errorMessage = "Network error: Please check your internet connection and try again.";
-              break;
-            case "no-speech":
-              errorMessage = "No speech detected. Please try speaking again.";
-              break;
-            case "audio-capture":
-              errorMessage = "Microphone not found or not accessible. Please check your microphone permissions.";
-              break;
-            case "not-allowed":
-              errorMessage = "Microphone permission denied. Please allow microphone access in your browser settings.";
-              break;
-            case "aborted":
-              // User stopped manually, don't show error
-              return;
-            case "service-not-allowed":
-              errorMessage = "Speech recognition service not available. Please try again later.";
-              break;
-            default:
-              errorMessage = `Speech recognition error: ${event.error}. Please try again.`;
-          }
-          
-          setError(errorMessage);
-          // Auto-dismiss error after 5 seconds
-          setTimeout(() => setError(null), 5000);
-        };
-      }
+    if (geminiApiKey && !isGeminiConnected) {
+      connectGemini();
     }
+  }, [geminiApiKey, isGeminiConnected, connectGemini]);
 
+  // Cleanup on unmount
+  useEffect(() => {
     return () => {
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
-      }
-      if (synthesisRef.current) {
-        synthesisRef.current.cancel();
-      }
+      disconnectGemini();
+      stopListening();
     };
-  }, []);
+  }, [disconnectGemini, stopListening]);
 
-  const toggleListening = () => {
-    if (!recognitionRef.current) {
-      alert("Speech recognition not supported in this browser");
-      return;
+  // Toggle listening
+  const toggleListening = useCallback(async () => {
+    try {
+      if (isListening) {
+        // Mark turn as complete when stopping
+        completeTurn();
+        stopListening();
+      } else {
+        // Ensure Gemini is connected before starting
+        if (!isGeminiConnected) {
+          if (geminiApiKey) {
+            connectGemini();
+            // Wait a bit for connection
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          } else {
+            setError("Gemini API key not configured");
+            return;
+          }
+        }
+
+        fullTranscriptRef.current = "";
+        setTranscript("");
+        await startListening();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Error toggling voice");
+      console.error("Error toggling listening:", err);
     }
+  }, [isListening, startListening, stopListening, isGeminiConnected, geminiApiKey, connectGemini, completeTurn]);
 
-    if (isListening) {
-      recognitionRef.current.stop();
-      setIsListening(false);
-    } else {
-      // Clear any previous errors when starting a new recording
-      setError(null);
-      recognitionRef.current.start();
-      setIsListening(true);
-      setTranscript("");
-      setInterimTranscript("");
-      finalTranscriptRef.current = "";
-      interimTranscriptRef.current = "";
+  // Update error state
+  useEffect(() => {
+    if (voiceError) {
+      setError(voiceError);
+    } else if (geminiError) {
+      setError(geminiError);
     }
-  };
-
-  const displayTranscript = transcript || interimTranscript;
+  }, [voiceError, geminiError]);
 
   return (
     <>
-      {/* Voice Activity Bar at Top */}
-      <VoiceActivityBar
-        isActive={isListening || isProcessing}
-        transcript={displayTranscript}
-      />
+      <AnimatePresence>
+        {(isListening || transcript) && (
+          <VoiceActivityBar isActive={isListening} transcript={transcript} />
+        )}
+      </AnimatePresence>
+
+      {/* Messages Display */}
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        style={{
+          maxHeight: "60vh",
+          overflowY: "auto",
+          marginBottom: "20px",
+          padding: "16px",
+          borderRadius: "12px",
+          background: "rgba(255, 255, 255, 0.05)",
+          border: "1px solid var(--glass-border)",
+        }}
+      >
+        {messages.length === 0 ? (
+          <p style={{ color: "var(--text-secondary)", textAlign: "center" }}>
+            {!isInitialized
+              ? "Initializing voice chat..."
+              : "Start talking to the AI..."}
+          </p>
+        ) : (
+          messages.map((msg, i) => (
+            <motion.div
+              key={i}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              style={{
+                marginBottom: "12px",
+                padding: "12px",
+                borderRadius: "8px",
+                background:
+                  msg.role === "user"
+                    ? "rgba(168, 144, 108, 0.2)"
+                    : "rgba(100, 150, 200, 0.2)",
+                borderLeft: `3px solid ${
+                  msg.role === "user"
+                    ? "var(--accent-gold)"
+                    : "var(--accent-blue)"
+                }`,
+              }}
+            >
+              <p
+                style={{
+                  margin: 0,
+                  color: "var(--text-primary)",
+                  fontSize: "0.9rem",
+                }}
+              >
+                <strong>{msg.role === "user" ? "You" : "AI"}:</strong>{" "}
+                {msg.content}
+              </p>
+            </motion.div>
+          ))
+        )}
+      </motion.div>
 
       {/* Error Display */}
       {error && (
         <motion.div
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -20 }}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
           style={{
-            position: "fixed",
-            top: "80px",
-            left: "50%",
-            transform: "translateX(-50%)",
-            width: "90vw",
-            maxWidth: "500px",
-            background: "rgba(220, 38, 38, 0.95)",
-            backdropFilter: "blur(20px)",
-            borderRadius: "12px",
-            border: "1px solid rgba(220, 38, 38, 0.5)",
-            boxShadow: "0 10px 40px rgba(220, 38, 38, 0.3)",
-            zIndex: 10001,
-            padding: "16px 20px",
-            marginTop: "16px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: "16px",
+            padding: "12px 16px",
+            borderRadius: "8px",
+            background: "rgba(239, 68, 68, 0.1)",
+            border: "1px solid rgba(239, 68, 68, 0.3)",
+            color: "#ef4444",
+            marginBottom: "16px",
+            fontSize: "0.9rem",
           }}
         >
-          <div style={{ flex: 1 }}>
-            <div
-              style={{
-                color: "#fff",
-                fontSize: "0.95rem",
-                fontWeight: 500,
-                marginBottom: "4px",
-              }}
-            >
-              ⚠️ Error
-            </div>
-            <div
-              style={{
-                color: "rgba(255, 255, 255, 0.9)",
-                fontSize: "0.85rem",
-                lineHeight: "1.4",
-              }}
-            >
-              {error}
-            </div>
-          </div>
-          <button
-            onClick={() => setError(null)}
-            style={{
-              background: "transparent",
-              border: "none",
-              color: "#fff",
-              cursor: "pointer",
-              fontSize: "1.2rem",
-              padding: "4px 8px",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              borderRadius: "4px",
-              transition: "background 0.2s ease",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = "rgba(255, 255, 255, 0.2)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = "transparent";
-            }}
-          >
-            ✕
-          </button>
+          {error}
         </motion.div>
       )}
 
-      {/* Results Display */}
-      {currentResult && (
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          style={{
-            position: "fixed",
-            top: "80px",
-            left: "50%",
-            transform: "translateX(-50%)",
-            width: "90vw",
-            maxWidth: "800px",
-            background: "rgba(10, 10, 12, 0.95)",
-            backdropFilter: "blur(20px)",
-            borderRadius: "16px",
-            border: "1px solid var(--glass-border)",
-            boxShadow: "0 10px 40px rgba(0,0,0,0.5)",
-            zIndex: 9999,
-            padding: "24px",
-            marginTop: "16px",
-          }}
-        >
-          {/* Editable Result Content */}
-          <div style={{ marginBottom: "16px" }}>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                marginBottom: "12px",
-              }}
-            >
-              <h3
-                style={{
-                  margin: 0,
-                  fontSize: "1.1rem",
-                  color: "var(--accent-gold)",
-                  fontWeight: 600,
-                }}
-              >
-                Response
-              </h3>
-              <button
-                onClick={() => setCurrentResult(null)}
-                style={{
-                  background: "transparent",
-                  border: "none",
-                  color: "var(--text-secondary)",
-                  cursor: "pointer",
-                  fontSize: "1.2rem",
-                  padding: "4px 8px",
-                }}
-              >
-                ✕
-              </button>
-            </div>
-
-            <div
-              style={{
-                color: "var(--text-primary)",
-                fontSize: "1rem",
-                lineHeight: "1.6",
-                marginBottom: "16px",
-              }}
-            >
-              {currentResult.content}
-            </div>
-
-            {/* RENDER IMAGES - CAROUSEL */}
-            {currentResult.type === "images" &&
-              currentResult.data &&
-              Array.isArray(currentResult.data) && (
-                <div
-                  style={{
-                    display: "flex",
-                    overflowX: "auto",
-                    gap: "12px",
-                    marginTop: "16px",
-                    paddingBottom: "8px",
-                    scrollBehavior: "smooth",
-                  }}
-                >
-                  {currentResult.data.map((url: string, imgIdx: number) => (
-                    <motion.img
-                      initial={{ opacity: 0, scale: 0.9 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      transition={{ delay: imgIdx * 0.1 }}
-                      key={imgIdx}
-                      src={url}
-                      alt="Venue visual"
-                      style={{
-                        minWidth: "200px",
-                        height: "150px",
-                        objectFit: "cover",
-                        borderRadius: "8px",
-                      }}
-                    />
-                  ))}
-                </div>
-              )}
-
-            {/* RENDER REVIEWS */}
-            {currentResult.type === "reviews" &&
-              currentResult.data &&
-              Array.isArray(currentResult.data) && (
-                <div
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: "12px",
-                    marginTop: "16px",
-                  }}
-                >
-                  {currentResult.data.map((review: any, rIdx: number) => (
-                    <div
-                      key={rIdx}
-                      style={{
-                        background: "rgba(255,255,255,0.05)",
-                        padding: "12px",
-                        borderRadius: "8px",
-                        fontSize: "0.9rem",
-                      }}
-                    >
-                      <div
-                        style={{
-                          fontWeight: "bold",
-                          marginBottom: "6px",
-                          color: "var(--accent-gold)",
-                        }}
-                      >
-                        {review.title}
-                      </div>
-                      <div style={{ color: "var(--text-secondary)" }}>
-                        {review.snippet}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-            {/* RENDER WEB RESULTS */}
-            {currentResult.type === "web_results" &&
-              currentResult.data &&
-              Array.isArray(currentResult.data) && (
-                <div
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: "12px",
-                    marginTop: "16px",
-                  }}
-                >
-                  {currentResult.data.map((res: any, rIdx: number) => (
-                    <a
-                      key={rIdx}
-                      href={res.link}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{
-                        display: "block",
-                        background: "rgba(255,255,255,0.05)",
-                        padding: "12px",
-                        borderRadius: "8px",
-                        textDecoration: "none",
-                        color: "inherit",
-                        border: "1px solid var(--glass-border)",
-                        transition: "all 0.2s ease",
-                      }}
-                      onMouseEnter={(e) => {
-                        e.currentTarget.style.background =
-                          "rgba(255,255,255,0.1)";
-                      }}
-                      onMouseLeave={(e) => {
-                        e.currentTarget.style.background =
-                          "rgba(255,255,255,0.05)";
-                      }}
-                    >
-                      <div
-                        style={{
-                          fontWeight: "bold",
-                          color: "var(--accent-gold)",
-                          fontSize: "0.95rem",
-                          marginBottom: "6px",
-                        }}
-                      >
-                        {res.title}
-                      </div>
-                      <div
-                        style={{
-                          fontSize: "0.85rem",
-                          color: "var(--text-secondary)",
-                          display: "-webkit-box",
-                          WebkitLineClamp: 2,
-                          WebkitBoxOrient: "vertical",
-                          overflow: "hidden",
-                        }}
-                      >
-                        {res.snippet}
-                      </div>
-                    </a>
-                  ))}
-                </div>
-              )}
-
-            {/* Action Buttons */}
-            <div
-              style={{
-                display: "flex",
-                gap: "12px",
-                marginTop: "20px",
-                paddingTop: "16px",
-                borderTop: "1px solid var(--glass-border)",
-              }}
-            >
-              <button
-                onClick={() => {
-                  if (currentResult) {
-                    handleUserMessage(
-                      "Can you modify or change the previous response?"
-                    );
-                  }
-                }}
-                style={{
-                  flex: 1,
-                  padding: "10px 16px",
-                  background: "rgba(201, 160, 80, 0.2)",
-                  border: "1px solid var(--accent-gold)",
-                  borderRadius: "8px",
-                  color: "var(--accent-gold)",
-                  cursor: "pointer",
-                  fontSize: "0.9rem",
-                  fontWeight: 500,
-                  transition: "all 0.2s ease",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "rgba(201, 160, 80, 0.3)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "rgba(201, 160, 80, 0.2)";
-                }}
-              >
-                Modify Response
-              </button>
-              <button
-                onClick={() => setCurrentResult(null)}
-                style={{
-                  padding: "10px 16px",
-                  background: "transparent",
-                  border: "1px solid var(--glass-border)",
-                  borderRadius: "8px",
-                  color: "var(--text-secondary)",
-                  cursor: "pointer",
-                  fontSize: "0.9rem",
-                  transition: "all 0.2s ease",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.borderColor = "var(--text-primary)";
-                  e.currentTarget.style.color = "var(--text-primary)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.borderColor = "var(--glass-border)";
-                  e.currentTarget.style.color = "var(--text-secondary)";
-                }}
-              >
-                Clear
-              </button>
-            </div>
-          </div>
-        </motion.div>
-      )}
-
-      {/* Mic Button - Always Visible */}
+      {/* Voice Control Button */}
       <motion.button
-        whileHover={{ scale: 1.1 }}
-        whileTap={{ scale: 0.9 }}
         onClick={toggleListening}
-        disabled={isProcessing || isSpeaking}
+        disabled={!isInitialized || !isGeminiConnected}
+        whileHover={{ scale: 1.05 }}
+        whileTap={{ scale: 0.95 }}
         style={{
           position: "fixed",
           bottom: "30px",
@@ -740,41 +376,31 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
           width: "60px",
           height: "60px",
           borderRadius: "50%",
-          background:
-            isListening
-              ? "#ff4444"
-              : isProcessing || isSpeaking
-              ? "#888"
-              : "var(--accent-gold)",
-          color: "var(--bg-primary)",
+          background: isListening ? "var(--accent-gold)" : isGeminiConnected ? "var(--accent-blue)" : "#666",
           border: "none",
-          boxShadow: isListening
-            ? "0 0 25px rgba(255, 68, 68, 0.6)"
-            : "0 4px 20px rgba(201, 160, 80, 0.4)",
-          cursor: isProcessing || isSpeaking ? "not-allowed" : "pointer",
-          zIndex: 9999,
+          color: "white",
+          fontSize: "24px",
+          cursor: isInitialized && isGeminiConnected ? "pointer" : "not-allowed",
+          opacity: isInitialized && isGeminiConnected ? 1 : 0.5,
+          boxShadow: "0 4px 12px rgba(0, 0, 0, 0.3)",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          fontSize: "1.5rem",
-          transition: "all 0.3s ease",
-          transform: isListening ? "scale(1.1)" : "scale(1)",
+          zIndex: 9999,
         }}
+        title={
+          !isGeminiConnected
+            ? "Connecting to Gemini..."
+            : isListening
+            ? "Stop recording"
+            : "Start recording"
+        }
       >
-        {isListening ? (
-          <motion.div
-            animate={{ scale: [1, 1.2, 1] }}
-            transition={{ repeat: Infinity, duration: 1.5 }}
-          >
-            ⏹
-          </motion.div>
-        ) : (
-          "🎤"
-        )}
+        {isListening ? "⏹" : "🎤"}
       </motion.button>
 
       {/* Status Indicator */}
-      {(isProcessing || isSpeaking) && (
+      {(isSpeaking || isListening) && (
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -793,7 +419,7 @@ export default function VoiceChatInterface({ currentVenues }: Props) {
             zIndex: 9998,
           }}
         >
-          {isProcessing ? "Processing..." : "Speaking..."}
+          {isSpeaking ? "AI is speaking..." : "Listening..."}
         </motion.div>
       )}
     </>
