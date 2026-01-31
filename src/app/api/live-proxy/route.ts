@@ -31,6 +31,26 @@ export default async function handler(req, res) {
       console.log("Client connected:", socket.id);
 
       let geminiWs = null;
+      let systemPrompt = "";
+
+      // Handle setup
+      socket.on("setup", (data: any) => {
+        systemPrompt = data.systemPrompt || "";
+        console.log("Setup received with system prompt");
+      });
+
+      // Handle end of turn signal
+      socket.on("end-turn", () => {
+        if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+          const message = {
+            clientContent: {
+              turns: [],
+              turnComplete: true,
+            },
+          };
+          geminiWs.send(JSON.stringify(message));
+        }
+      });
 
       // Handle audio data from client
       socket.on("audio", async (audioData) => {
@@ -43,14 +63,12 @@ export default async function handler(req, res) {
             return;
           }
 
-          geminiWs = new WebSocket(
-            "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent",
-            {
-              headers: {
-                Authorization: `Bearer ${GEMINI_API_KEY}`,
-              },
-            }
-          );
+          // Use API key as query parameter instead of Authorization header
+          const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`;
+
+          console.log("Connecting to Gemini Live API...");
+
+          geminiWs = new WebSocket(wsUrl);
 
           geminiWs.on("open", () => {
             console.log("Connected to Gemini Live API");
@@ -58,39 +76,69 @@ export default async function handler(req, res) {
             // Send setup message
             const setupMessage = {
               setup: {
-                model: "models/gemini-3-flash-preview",
-                generation_config: {
-                  response_modalities: ["AUDIO"],
-                  speech_config: {
-                    voice_config: {
-                      prebuilt_voice_config: {
-                        voice_name: "Aoede",
+                model: "models/gemini-2.0-flash-exp",
+                generationConfig: {
+                  responseModalities: ["AUDIO", "TEXT"],
+                  speechConfig: {
+                    voiceConfig: {
+                      prebuiltVoiceConfig: {
+                        voiceName: "Aoede",
                       },
                     },
                   },
                 },
+                systemInstruction: {
+                  parts: [
+                    {
+                      text: systemPrompt || "You are a helpful assistant.",
+                    },
+                  ],
+                },
               },
             };
 
+            console.log("Sending setup message to Gemini...");
             geminiWs.send(JSON.stringify(setupMessage));
           });
 
           geminiWs.on("message", (data) => {
-            // Forward Gemini response to client
-            socket.emit("audio-response", data.toString());
+            try {
+              const response = JSON.parse(data.toString());
+              
+              // Forward full response to client
+              socket.emit("audio-response", JSON.stringify(response));
+              
+              // Also emit transcript updates if available
+              if (response.serverContent?.modelTurn?.parts) {
+                const parts = response.serverContent.modelTurn.parts;
+                for (const part of parts) {
+                  if (part.text) {
+                    socket.emit("transcript", part.text);
+                  }
+                }
+              }
+            } catch (err) {
+              console.error("Error parsing Gemini message:", err);
+              // If not JSON, forward as-is (shouldn't happen but handle it)
+              socket.emit("audio-response", data.toString());
+            }
           });
 
           geminiWs.on("error", (error) => {
             console.error("Gemini WebSocket error:", error);
-            socket.emit("error", { message: "Gemini connection error" });
+            socket.emit("error", { 
+              message: "Gemini connection error",
+              details: error.toString()
+            });
           });
 
-          geminiWs.on("close", () => {
-            console.log("Gemini WebSocket closed");
+          geminiWs.on("close", (code, reason) => {
+            console.log(`Gemini WebSocket closed: code=${code}, reason=${reason}`);
+            geminiWs = null;
           });
         }
 
-        // Forward audio to Gemini
+        // Forward audio to Gemini with turnComplete: false for continuous streaming
         if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
           const message = {
             clientContent: {
@@ -107,7 +155,7 @@ export default async function handler(req, res) {
                   ],
                 },
               ],
-              turnComplete: true,
+              turnComplete: false, // Continuous streaming for natural conversation
             },
           };
 
@@ -119,6 +167,7 @@ export default async function handler(req, res) {
         console.log("Client disconnected:", socket.id);
         if (geminiWs) {
           geminiWs.close();
+          geminiWs = null;
         }
       });
     });
